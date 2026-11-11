@@ -455,10 +455,10 @@ static int code_built_list(void) {  // the list the game code was built with: lo
     CHECK(cheats_code_load("extracted/exefs", "extracted/lasgame.so.variants", 0x7000000000ull) == 3);
     CheatList l;
     CHECK(cheats_load("extracted/exefs", &l) == 4);
-    CHECK(cheat_code_supported(&l.c[0], 0x7000000000ull, 0, 0x4000));   // (Always Level 100: compiled in)
-    CHECK(cheat_code_supported(&l.c[1], 0x7000000000ull, 0, 0x4000));   // (its Off)
-    CHECK(!cheat_code_supported(&l.c[2], 0x7000000000ull, 0, 0x4000));  // (Two at once: half of it left out)
-    CHECK(cheat_code_supported(&l.c[3], 0x7000000000ull, 0, 0x4000));   // (no code writes: nothing needed)
+    CHECK(cheat_code_supported(&l.c[0], 0x7000000000ull, 0, 0x4000, 0x4000));   // (Always Level 100: compiled in)
+    CHECK(cheat_code_supported(&l.c[1], 0x7000000000ull, 0, 0x4000, 0x4000));   // (its Off)
+    CHECK(!cheat_code_supported(&l.c[2], 0x7000000000ull, 0, 0x4000, 0x4000));  // (Two at once: half of it left out)
+    CHECK(cheat_code_supported(&l.c[3], 0x7000000000ull, 0, 0x4000, 0x4000));   // (no code writes: nothing needed)
     cheats_free(&l);
     // a list for another cheat file (an older import): not loaded, nothing on
     write_file("extracted/lasgame.so.variants", "hash 0123456789abcdef\n0x1000 0x52800c80\n", 40);
@@ -495,6 +495,66 @@ static int prepare_copied_file(void) {  // a cheat file copied in (the AppImage'
     return ok;
 }
 
+static int variants_offset_register(void) {  // 0TMR..: R is 0 at the start of a run, so a register not set yet adds 0
+    int ok = 1;
+    CheatList l;
+    CHECK(cheats_parse("[Level 100, as posted]\n040D0000 00001000 52800C80\n"
+                       "[A register set first]\n400D0000 00000000 00000010\n040D0000 00002000 52800020\n", &l));
+    CheatVariant v[8];
+    CheatList one = {&l.c[0], 1}, two = {&l.c[1], 1};
+    CHECK(cheats_code_variants(&one, 0, 0x4000, v, 8) == 1 && v[0].off == 0x1000 && v[0].word == 0x52800C80 && !v[0].cave);
+    CHECK(cheats_code_variants(&two, 0, 0x4000, v, 8) == 0);  // (r13 = 0x10 first: a moving address, not compiled in)
+    cheats_free(&l);
+    return ok;
+}
+
+static int variants_cave(void) {  // words written past the end of the code (before read-only data): new code, a cave
+    int ok = 1;
+    CheatList l;
+    CHECK(cheats_parse("{Master}\n040A0000 00004000 52800020\n040A0000 00004004 D65F03C0\n040A0000 00001000 94000000\n", &l));
+    CheatVariant v[8];
+    int n = cheats_code_variants_cave(&l, 0, 0x4000, 0x5000, v, 8);
+    CHECK(n == 3);
+    int caves = 0;
+    for (int i = 0; i < n; i++) caves += v[i].cave;
+    CHECK(caves == 2);
+    for (int i = 0; i < n; i++)
+        if (v[i].off == 0x4000) CHECK(v[i].cave && v[i].word == 0x52800020);
+    CHECK(cheats_code_variants_cave(&l, 0, 0x4000, 0x4000, v, 8) == 1);  // (no gap: only the bl)
+    cheats_free(&l);
+    return ok;
+}
+
+static int variants_cave_file(void) {  // the variants file has the cave too, and the table takes the cave's writes
+    int ok = 1;
+    fresh_tmp();
+    exefs_with_build(PLA_111);
+    uint8_t hdr[0x28] = {0};  // (text 0..0x4000, read-only data from 0x5000)
+    FILE *f = fopen("extracted/exefs/main", "r+b");
+    fread(hdr, 1, sizeof hdr, f);
+    uint32_t tsize = 0x4000, ro = 0x5000;
+    memcpy(hdr + 0x18, &tsize, 4), memcpy(hdr + 0x24, &ro, 4);
+    fseek(f, 0, SEEK_SET), fwrite(hdr, 1, sizeof hdr, f), fclose(f);
+    const char *t = "{Master}\n040A0000 00004000 52800020\n040A0000 00004004 D65F03C0\n[Use it]\n040A0000 00001000 94000C00\n";
+    write_file("c.txt", t, strlen(t));
+    char why[256], p[PATH_MAX], h[17], buf[1024] = "";
+    CHECK(cheats_import("c.txt", "extracted/exefs", why, sizeof why));
+    CHECK(cheats_variants_path("extracted/exefs", p, sizeof p));
+    FILE *j = fopen(p, "rb");
+    if (j) { buf[fread(buf, 1, sizeof buf - 1, j)] = 0; fclose(j); }
+    CHECK(strstr(buf, "\"cave\"") && strstr(buf, "\"0x4000\": \"0x52800020\"") && strstr(buf, "\"0x4004\": \"0xd65f03c0\""));
+    CHECK(strstr(buf, "\"0x1000\": [\"0x94000c00\"]") != NULL);
+    // the generator's list: the cave's words count as compiled in
+    CHECK(cheats_variants_hash("extracted/exefs", h));
+    char list[256];
+    snprintf(list, sizeof list, "hash %s\n0x1000 0x94000c00\n0x4000 0x52800020\n0x4004 0xd65f03c0\n", h);
+    write_file("extracted/lasgame.so.variants", list, strlen(list));
+    CHECK(cheats_code_load("extracted/exefs", "extracted/lasgame.so.variants", 0x7000000000ull) == 3);
+    uint32_t w = 0x52800020;
+    CHECK(cheat_code_write(0x7000004000ull, &w, 4));  // (the master code writing its cave: taken, not refused)
+    return ok;
+}
+
 int main(void) {
     struct { const char *name; int (*fn)(void); } tests[] = {
         {"parse_file", parse_file}, {"op0_store_static", op0_store_static}, {"op0_code_blocked", op0_code_blocked},
@@ -505,7 +565,8 @@ int main(void) {
         {"import_zip", import_zip}, {"toggles_saved", toggles_saved},
         {"variants_list", variants_list}, {"variants_file", variants_file}, {"code_table", code_table},
         {"vm_code_redirect", vm_code_redirect}, {"code_built_list", code_built_list},
-        {"prepare_copied_file", prepare_copied_file},
+        {"prepare_copied_file", prepare_copied_file}, {"variants_offset_register", variants_offset_register},
+        {"variants_cave", variants_cave}, {"variants_cave_file", variants_cave_file},
     };
     for (size_t i = 0; i < sizeof tests / sizeof *tests; i++) {
         g_run++;

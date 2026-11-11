@@ -1,0 +1,305 @@
+From 64afa5aadd7bcd26d02802d669e4d4d62ee26eb3 Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 22:55:54 -0500
+Subject: [PATCH] Code cheats: offset-register writes and code caves
+
+Most posted code cheats write with an offset register the cheat never sets
+(040A0000 ..., 040D0000 ...: 0 at the start of a run, so a fixed address):
+those are variants now too; a register the cheat sets first still means a
+moving address. A master code that writes new code past the end of main's
+code (a code cave, before its read-only data) and patches a bl to call it:
+the variants file's "cave" words extend main's code in the generator and
+each run starts a function of its own; the cheat VM's writes there are taken
+as compiled in. The cheat runner treats main's code, the gap after it and its
+read-only data as never writable (a cave's page may be read-only). On the
+GBAtemp 1.1.1 file: 122 words at 54 addresses + a 15-word cave, none left out.
+---
+ runtime/cheats.c          | 73 +++++++++++++++++++++++++++++++++------
+ runtime/cheats.h          | 14 ++++++--
+ runtime/hle/cheats_rt.c   |  8 +++--
+ runtime/ui/launcher_lg.mm |  8 ++---
+ tools/gen.py              | 25 ++++++++++++++
+ 5 files changed, 107 insertions(+), 21 deletions(-)
+
+diff --git a/runtime/cheats.c b/runtime/cheats.c
+index 07f16c1..70cb4a3 100644
+--- a/runtime/cheats.c
++++ b/runtime/cheats.c
+@@ -369,33 +369,61 @@ bool cheat_patches_code(const Cheat *c, uint64_t code_lo, uint64_t code_hi) {
+     return false;
+ }
+ 
+-int cheats_code_variants(const CheatList *l, uint64_t code_lo, uint64_t code_hi, CheatVariant *out, int max) {
++// the registers an op sets (a write through one of them later is to a moving address): bit per register
++static unsigned regs_set_by(const uint32_t *op, int n, int pc) {
++    uint32_t f = op[pc];
++    unsigned t = f >> 28, r3 = (f >> 16) & 0xF, inc = (f >> 12) & 0xF;
++    switch (t) {
++    case 3: return ((f >> 20) & 0xF) == 0 ? 1u << ((f >> 16) & 0xF) : 0;  // (a loop's counter)
++    case 4: case 5: case 7: case 9: return 1u << r3;                    // (load, load from memory, arithmetic)
++    case 6: case 0xA: return inc ? 1u << r3 : 0;                        // (stores that step their address register)
++    case 0xC: {
++        unsigned sub = (f >> 24) & 0xFF;
++        if (sub == 0xC1) return 1u << ((f >> 16) & 0xF);  // (restore / clear into a register)
++        if (sub == 0xC2) return f & 0xFFFF;
++        if (sub == 0xC3) return 1u << (f & 0xF);
++        return 0;
++    }
++    default: (void)n; return 0;
++    }
++}
++
++int cheats_code_variants_cave(const CheatList *l, uint64_t code_lo, uint64_t code_hi, uint64_t gap_hi, CheatVariant *out,
++                              int max) {
+     int n = 0;
+     for (int i = 0; i < l->n; i++) {
+         const Cheat *c = &l->c[i];
++        unsigned set = 0;  // (registers this cheat has set so far)
+         for (int pc = 0; pc < c->nop;) {
+             int len = op_len(c->op, c->nop, pc);
+             if (len == 0) break;
+             uint32_t f = c->op[pc];
+             unsigned w = (f >> 24) & 0xF, m = (f >> 20) & 0xF, r = (f >> 16) & 0xF;
+-            if (f >> 28 == 0 && m == CHEAT_MAIN && r == 0 && (w == 4 || w == 8)) {  // (a fixed write, no offset register)
++            if (f >> 28 == 0 && m == CHEAT_MAIN && !(set >> r & 1) && (w == 4 || w == 8)) {  // (a fixed address)
+                 uint64_t a = (uint64_t)(f & 0xFF) << 32 | c->op[pc + 1];
+                 uint64_t v = w == 8 ? (uint64_t)c->op[pc + 2] << 32 | c->op[pc + 3] : c->op[pc + 2];
+                 for (unsigned k = 0; k < w / 4; k++) {
+                     uint64_t off = a + 4 * k;
+                     uint32_t word = (uint32_t)(v >> (32 * k));
+-                    if (off < code_lo || off >= code_hi || (off & 3)) continue;
++                    bool cave = off >= code_hi && off < gap_hi;
++                    if ((off < code_lo || off >= code_hi) && !cave) continue;
++                    if (off & 3) continue;
+                     bool seen = false;
+                     for (int j = 0; j < n && !seen; j++) seen = out[j].off == off && out[j].word == word;
+-                    if (!seen && n < max) out[n++] = (CheatVariant){off, word};
++                    if (!seen && n < max) out[n++] = (CheatVariant){off, word, cave};
+                 }
+             }
++            set |= regs_set_by(c->op, c->nop, pc);
+             pc += len;
+         }
+     }
+     return n;
+ }
+ 
++int cheats_code_variants(const CheatList *l, uint64_t code_lo, uint64_t code_hi, CheatVariant *out, int max) {
++    return cheats_code_variants_cave(l, code_lo, code_hi, code_hi, out, max);
++}
++
+ // ---- the variants compiled into the running game code: an open-addressed table by address
+ #define CODE_SITES 4096
+ #define CODE_WORDS 8  // (variants at one address, at most)
+@@ -531,6 +559,20 @@ bool cheats_main_code(const char *exefs, uint64_t *lo, uint64_t *hi) {  // (NSO
+     return true;
+ }
+ 
++bool cheats_main_layout(const char *exefs, uint64_t *code_lo, uint64_t *code_hi, uint64_t *ro_lo) {
++    if (!cheats_main_code(exefs, code_lo, code_hi)) return false;
++    char p[PATH_MAX];
++    snprintf(p, sizeof p, "%s/main", exefs);
++    FILE *f = fopen(p, "rb");
++    uint8_t h[0x28];
++    bool ok = f && fread(h, 1, sizeof h, f) == sizeof h;  // (NSO header: read-only data's memory offset at +0x24)
++    if (f) fclose(f);
++    uint32_t ro = 0;
++    if (ok) memcpy(&ro, h + 0x24, 4);
++    *ro_lo = ok && ro >= *code_hi ? ro : *code_hi;
++    return true;
++}
++
+ bool cheats_variants_path(const char *exefs, char *out, size_t n) { return cheat_path(exefs, ".variants.json", out, n, false); }
+ 
+ static bool write_variants(const char *exefs, const char *text) {
+@@ -541,7 +583,9 @@ static bool write_variants(const char *exefs, const char *text) {
+     enum { MAXV = 4096 };
+     CheatVariant *v = malloc(MAXV * sizeof *v);
+     int n = 0;
+-    if (v && cheats_main_code(exefs, &lo, &hi) && cheats_parse(text, &l)) n = cheats_code_variants(&l, lo, hi, v, MAXV), cheats_free(&l);
++    uint64_t ro = 0;
++    if (v && cheats_main_layout(exefs, &lo, &hi, &ro) && cheats_parse(text, &l))
++        n = cheats_code_variants_cave(&l, lo, hi, ro, v, MAXV), cheats_free(&l);
+     if (n == 0) {  // (no code cheats: no list - nothing for the game code to be rebuilt for)
+         free(v);
+         return remove(p) == 0 || errno == ENOENT;
+@@ -550,15 +594,22 @@ static bool write_variants(const char *exefs, const char *text) {
+     char *j = malloc(cap);
+     if (!j) { free(v); return false; }
+     k += (size_t)snprintf(j + k, cap - k, "{\"code\": {");
++    int entries = 0;
+     for (int i = 0; i < n; i++) {
++        if (v[i].cave) continue;
+         bool first = true;
+-        for (int q = 0; q < i && first; q++) first = v[q].off != v[i].off;  // (each address once, with all its words)
++        for (int q = 0; q < i && first; q++) first = v[q].cave || v[q].off != v[i].off;  // (each address once, all its words)
+         if (!first) continue;
+-        k += (size_t)snprintf(j + k, cap - k, "%s\"0x%llx\": [", k > 10 ? ", " : "", (unsigned long long)v[i].off);
++        k += (size_t)snprintf(j + k, cap - k, "%s\"0x%llx\": [", entries++ ? ", " : "", (unsigned long long)v[i].off);
+         for (int q = i, m = 0; q < n; q++)
+-            if (v[q].off == v[i].off) k += (size_t)snprintf(j + k, cap - k, "%s\"0x%08x\"", m++ ? ", " : "", v[q].word);
++            if (!v[q].cave && v[q].off == v[i].off) k += (size_t)snprintf(j + k, cap - k, "%s\"0x%08x\"", m++ ? ", " : "", v[q].word);
+         k += (size_t)snprintf(j + k, cap - k, "]");
+     }
++    k += (size_t)snprintf(j + k, cap - k, "}, \"cave\": {");  // (the code caves: one word per address)
++    entries = 0;
++    for (int i = 0; i < n; i++)
++        if (v[i].cave)
++            k += (size_t)snprintf(j + k, cap - k, "%s\"0x%llx\": \"0x%08x\"", entries++ ? ", " : "", (unsigned long long)v[i].off, v[i].word);
+     k += (size_t)snprintf(j + k, cap - k, "}}\n");
+     bool ok = write_atomic(p, j, k);
+     free(j), free(v);
+@@ -719,10 +770,10 @@ int cheats_code_load(const char *exefs, const char *list_path, uint64_t main_bas
+     return n;
+ }
+ 
+-bool cheat_code_supported(const Cheat *c, uint64_t main_base, uint64_t code_lo, uint64_t code_hi) {
++bool cheat_code_supported(const Cheat *c, uint64_t main_base, uint64_t code_lo, uint64_t code_hi, uint64_t gap_hi) {
+     CheatList one = {(Cheat *)c, 1};
+-    CheatVariant v[64];
+-    int n = cheats_code_variants(&one, code_lo, code_hi, v, 64);
++    CheatVariant v[CHEAT_MAX_OPS];
++    int n = cheats_code_variants_cave(&one, code_lo, code_hi, gap_hi, v, CHEAT_MAX_OPS);
+     for (int i = 0; i < n; i++) {
+         int s = site_find(main_base + v[i].off, false);
+         if (s < 0) return false;
+diff --git a/runtime/cheats.h b/runtime/cheats.h
+index 7a29afa..1fa17ff 100644
+--- a/runtime/cheats.h
++++ b/runtime/cheats.h
+@@ -80,12 +80,19 @@ bool cheats_any_on(const char *exefs);
+ typedef struct {
+     uint64_t off;   // from main's base
+     uint32_t word;  // the instruction written there
++    bool cave;      // past the end of main's code (before its read-only data): new code, a "code cave" - compiled as a
++                    // function of its own (gen.py extends main's code), not as a variant of an instruction
+ } CheatVariant;
+ #define CHEAT_CODE_ORIGINAL 0xFFFFFFFFu  // (cheat_code_word: no variant on - the game's own instruction)
+ // main's code (its NSO text segment) as offsets from its base
+ bool cheats_main_code(const char *exefs, uint64_t *lo, uint64_t *hi);
+-// every distinct (offset, word) a cheat writes into [code_lo, code_hi) at a fixed address, 4 or 8 bytes at a time
++// main's layout too: where its read-only data starts (the end of the gap a code cave lives in)
++bool cheats_main_layout(const char *exefs, uint64_t *code_lo, uint64_t *code_hi, uint64_t *ro_lo);
++// every distinct (offset, word) a cheat writes into [code_lo, code_hi) at a fixed address, 4 or 8 bytes at a time: a
++// write with an offset register counts when the cheat hasn't set that register yet (registers are 0 at the start of a
++// run); the _cave form also takes the words written into [code_hi, gap_hi) (cave = true)
+ int cheats_code_variants(const CheatList *l, uint64_t code_lo, uint64_t code_hi, CheatVariant *out, int max);
++int cheats_code_variants_cave(const CheatList *l, uint64_t code_lo, uint64_t code_hi, uint64_t gap_hi, CheatVariant *out, int max);
+ // <data>/cheats/<build id>.variants.json (written by cheats_import): {"code": {"0x<off>": ["0x<word>", ...]}}
+ bool cheats_variants_path(const char *exefs, char *out, size_t n);
+ bool cheats_variants_hash(const char *exefs, char out[17]);  // of that file (FNV-1a 64, hex); false: none
+@@ -98,8 +105,9 @@ uint32_t cheat_code_word(uint64_t addr);                          // the word on
+ // "0x<off> 0x<word>" lines): into the table at main_base + off, if <h> is this cheat file's variants hash. Returns
+ // the variants loaded, -1 when the list is missing or for another cheat file (the table then empty).
+ int cheats_code_load(const char *exefs, const char *list_path, uint64_t main_base);
+-// every instruction the cheat writes into main's code [code_lo, code_hi) is compiled in (a cheat with none: true)
+-bool cheat_code_supported(const Cheat *c, uint64_t main_base, uint64_t code_lo, uint64_t code_hi);
++// every instruction the cheat writes into main's code [code_lo, code_hi) and its cave [code_hi, gap_hi) is compiled in
++// (a cheat with none: true)
++bool cheat_code_supported(const Cheat *c, uint64_t main_base, uint64_t code_lo, uint64_t code_hi, uint64_t gap_hi);
+ // The variants list made again when the cheat file is newer than it (or it is missing): a cheat file copied into
+ // <data>/cheats by hand or by the AppImage (its bundled one) gets its code cheats too. false: couldn't write it.
+ bool cheats_prepare(const char *exefs);
+diff --git a/runtime/hle/cheats_rt.c b/runtime/hle/cheats_rt.c
+index 171c315..a9dd34e 100644
+--- a/runtime/hle/cheats_rt.c
++++ b/runtime/hle/cheats_rt.c
+@@ -32,8 +32,9 @@ static bool rt_writable(uint64_t a, uint64_t n) {
+     if (!in_window(a, n)) return false;
+     for (int i = 0; i < g_nmodules; i++) {
+         const Module *m = &g_modules[i];
+-        if (overlaps(a, n, m->base + m->text_off, m->text_size) || overlaps(a, n, m->base + m->ro_off, m->ro_size))
+-            return false;
++        // (code, the gap after it - a code cave's place, maybe on a read-only page - and read-only data: up to the data)
++        uint64_t lo = m->base + m->text_off, hi = m->data_off > m->text_off ? m->base + m->data_off : m->base + m->ro_off + m->ro_size;
++        if (overlaps(a, n, lo, hi - lo)) return false;
+     }
+     pagewatch_prewrite(a, n);  // (the VM writes right after: host copies of watched pages see it)
+     return true;
+@@ -53,6 +54,7 @@ void cheats_rt_load(const char *exefs) {
+     if (cheats_load(exefs, &l) <= 0) return;
+     uint64_t text = g_nmodules ? g_modules[0].text_off : 0, text_n = g_nmodules ? g_modules[0].text_size : 0;
+     uint64_t main_base = g_nmodules ? g_modules[0].base : MAIN_BASE;
++    uint64_t ro_at = g_nmodules && g_modules[0].ro_off > text + text_n ? g_modules[0].ro_off : text + text_n;  // (a cave's gap ends)
+     char list[1100];  // (the code cheats compiled into the game code: <game dir>/lasgame.so.variants, runtime/gamebuild.c)
+     snprintf(list, sizeof list, "%s", exefs);
+     char *sl = strrchr(list, '/');
+@@ -66,7 +68,7 @@ void cheats_rt_load(const char *exefs) {
+         if (!c->nop) continue;
+         if (c->master) { if (master < 0) master = i, take[i] = true, total += c->nop; continue; }
+         if (!cheats_is_on(exefs, c->name)) continue;
+-        if (cheat_patches_code(c, text, text + text_n) && !cheat_code_supported(c, main_base, text, text + text_n)) {
++        if (cheat_patches_code(c, text, ro_at) && !cheat_code_supported(c, main_base, text, text + text_n, ro_at)) {
+             LOG("[cheats] \"%s\" changes the game's code, and the game code wasn't built with it: skipped\n", c->name);
+             continue;
+         }
+diff --git a/runtime/ui/launcher_lg.mm b/runtime/ui/launcher_lg.mm
+index 1f895d9..c3e6a57 100644
+--- a/runtime/ui/launcher_lg.mm
++++ b/runtime/ui/launcher_lg.mm
+@@ -534,15 +534,15 @@ static void cheats_section(SDL_Window *win) {
+         stale = false;
+         cheats_free(&list);
+         on.clear(), code.clear();
+-        uint64_t lo = 0, hi = 0;
+-        bool text = have_game && cheats_main_code(ex, &lo, &hi);
++        uint64_t lo = 0, hi = 0, ro = 0;
++        bool text = have_game && cheats_main_layout(ex, &lo, &hi, &ro);
+         built = have_game && cheats_code_load(ex, "extracted/" GAMELIB_NAME ".variants", 0) >= 0;
+         ready.clear();
+         if (have_game && cheats_load(ex, &list) > 0)
+             for (int i = 0; i < list.n; i++) {
+                 on.push_back(cheats_is_on(ex, list.c[i].name));
+-                code.push_back(text && cheat_patches_code(&list.c[i], lo, hi));
+-                ready.push_back(built && cheat_code_supported(&list.c[i], 0, lo, hi));
++                code.push_back(text && cheat_patches_code(&list.c[i], lo, ro));  // (its code, or a cave after it)
++                ready.push_back(built && cheat_code_supported(&list.c[i], 0, lo, hi, ro));
+             }
+     }
+     static bool was_running;  // (a rebuild just ended: what's compiled in is read again)
+diff --git a/tools/gen.py b/tools/gen.py
+index 84e507c..1a2b1fd 100644
+--- a/tools/gen.py
++++ b/tools/gen.py
+@@ -770,6 +770,29 @@ def load_code_variants(m, path):
+     except (OSError, ValueError, KeyError) as e:
+         print(f'{m.name}: code variants: {path} unreadable ({e}): none', file=sys.stderr)
+         return kept
++    # code caves: new code a cheat writes past the end of the module's code (its master code's hook function, say) -
++    # the module's code is extended with it, and each run of cave words starts a function of its own
++    cave = {int(o, 16): int(w, 16) for o, w in _json.load(open(path)).get('cave', {}).items()}
++    if cave:
++        end_off = m.hi - m.base
++        words = list(m.words)
++        last = max(cave)
++        if all(o >= end_off and o % 4 == 0 for o in cave) and last - end_off < 0x100000:
++            words += [0] * ((last + 4 - end_off) // 4)  # (padding where the cave leaves gaps: udf, never reached)
++            for o, w in cave.items():
++                try:
++                    m.lifter.lift(w, m.base + o)
++                except Exception as e:
++                    print(f'{m.name}: code cave word {m.base + o:#x} = {w:#010x} left out: {e}', file=sys.stderr)
++                    continue
++                words[(o - end_off) // 4 + (end_off - (m.lo - m.base)) // 4] = w
++                kept.append((o, w))
++            m.cave_starts = sorted(m.base + o for o in cave if o - 4 not in cave)
++            m.words = tuple(words)
++            m.hi = m.base + last + 4
++            print(f'{m.name}: code cave of {len(cave)} words at {", ".join(hex(a) for a in m.cave_starts)}', file=sys.stderr)
++        else:
++            print(f'{m.name}: code cave outside the space after the code: left out', file=sys.stderr)
+     for off_s, words in code.items():
+         off = int(off_s, 16)
+         a = m.base + off
+@@ -839,6 +862,8 @@ def main():
+         RANDO_CODE.clear()
+     code_ok = load_code_variants(m, args.code_variants) if args.name == 'main' and args.code_variants else None
+     starts = m.boundaries()
++    if getattr(m, 'cave_starts', None):  # (the code cheats' caves: functions of their own - load_code_variants)
++        starts = sorted(set(starts) | set(m.cave_starts))
+     hle = {}
+     if args.hle and os.path.exists(args.hle):
+         want = {l.strip() for l in open(args.hle) if l.strip() and not l.startswith('#')}
+-- 
+2.56.0
+

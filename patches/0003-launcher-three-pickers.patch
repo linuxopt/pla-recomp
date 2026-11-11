@@ -1,0 +1,246 @@
+From e83a91d1318e139df79c75d2da14188e1aed7d66 Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 20:12:04 -0500
+Subject: [PATCH] Launcher: base game, update and prod.keys pickers
+
+Game Files: one row per file (Browse...), Recompile once all three exist,
+prod.keys pre-filled from the usual places, each failure under the row it is
+about. The extracted-dump folder picker stays as a small link.
+---
+ runtime/ui/launcher_lg.mm | 169 +++++++++++++++++++++++++++++---------
+ 1 file changed, 130 insertions(+), 39 deletions(-)
+
+diff --git a/runtime/ui/launcher_lg.mm b/runtime/ui/launcher_lg.mm
+index 97cc1c2..d5aeea9 100644
+--- a/runtime/ui/launcher_lg.mm
++++ b/runtime/ui/launcher_lg.mm
+@@ -37,6 +37,7 @@ extern "C" {
+ #include "gamesetup.h"
+ #include "input_bind.h"
+ #include "mods.h"
++#include "nxpkg.h"
+ #include "platform.h"
+ #include "plugin.h"
+ #include "paths.h"
+@@ -429,73 +430,161 @@ static bool take(char *slot, char *out, size_t n) {
+ // ------------------------------------------------------------------ the game files section
+ static const ImVec4 k_green(0.45f, 0.85f, 0.50f, 1), k_red(1.0f, 0.45f, 0.40f, 1), k_yellow(1.0f, 0.82f, 0.35f, 1);
+ 
+-static void game_files_section(SDL_Window *win) {
+-    ImGui::SeparatorText(T("Game files", "Arquivos do jogo"));
+-    int st = setup_state();
+-    if (setup_running()) {
+-        static const char *const en[] = {"", "Looking for the game files...", "Reading the game files out of the packages...", "Copying the game files...",
+-                                         "Building the game data image...", "Reading the game code...",
+-                                         "Recompiling the game code...", "Finishing..."};
+-        static const char *const pt[] = {"", "Procurando os arquivos do jogo...", "Lendo os arquivos do jogo dos pacotes...", "Copiando os arquivos do jogo...",
+-                                         "Montando a imagem de dados do jogo...", "Lendo o código do jogo...",
+-                                         "Recompilando o código do jogo...", "Finalizando..."};
+-        ImGui::TextUnformatted(st >= 1 && st <= 7 ? T(en[st], pt[st]) : "...");
+-        ImGui::ProgressBar(setup_progress(), ImVec2(-FLT_MIN, 0));
+-        ImGui::TextDisabled("%s", T("This takes a while (10-30 minutes), only once. The game can be played when it's done.",
+-                                    "Isso demora (de 10 a 30 minutos), só uma vez. O jogo fica liberado quando terminar."));
+-        return;
+-    }
+-    bool ready = setup_ready();
+-    if (ready) {
+-        const char *name = game_name("extracted/exefs");
+-        ImGui::TextColored(k_green, g_pt ? "Pokémon %s - pronto para jogar" : "Pokémon %s - ready to play",
+-                           name ? name : "Legends: Arceus");
+-        ImGui::SameLine();
+-        if (ImGui::SmallButton(T("Change...", "Trocar..."))) SDL_ShowOpenFolderDialog(picked_game, NULL, win, NULL, false);
+-        if (st < SETUP_FAIL_NOT_FOUND) return;  // (a failed change: why, below - the game files set up before still play)
++// ---- the three picked files (base game, update, prod.keys: runtime/gamesetup.h setup_start_files)
++enum { PICK_BASE, PICK_UPDATE, PICK_KEYS, NPICK };
++static char g_pick_file[NPICK][1024];
++static bool g_setup_from_folder;  // the last setup was the extracted-dump folder (its messages go under that link)
++static void SDLCALL picked_file(void *which, const char *const *files, int) {
++    if (!files || !files[0]) return;
++    int i = (int)(intptr_t)which;
++    pthread_mutex_lock(&g_pick_lock);
++    snprintf(g_pick_file[i], sizeof g_pick_file[i], "%s", files[0]);
++    pthread_mutex_unlock(&g_pick_lock);
++}
++static char *pick_path(int i) {
++    return i == PICK_BASE ? g_settings.setup_base : i == PICK_UPDATE ? g_settings.setup_update : g_settings.setup_keys;
++}
++static size_t pick_size(int) { return sizeof g_settings.setup_base; }
++static bool is_file_there(const char *p) {
++    struct stat st;
++    return p[0] && stat(p, &st) == 0 && S_ISREG(st.st_mode);
++}
++// The row a failure is about (its message is drawn under it); NPICK = under Recompile
++static int fail_row(int st) {
++    switch (st) {
++    case SETUP_FAIL_KEYS: case SETUP_FAIL_KEYS_OLD: return PICK_KEYS;
++    case SETUP_FAIL_GAME_VERSION: case SETUP_FAIL_NO_BASE: return PICK_UPDATE;
++    case SETUP_FAIL_NOT_FOUND: case SETUP_FAIL_PACKAGE: case SETUP_FAIL_VERSION: case SETUP_FAIL_UNPACK: return PICK_BASE;
++    default: return NPICK;
+     }
+-    if (st >= SETUP_FAIL_NOT_FOUND) {
++}
++static void fail_text(int st) {
+         static const char *const en[] = {"No game files found in that folder.", "Those are compressed game files (.nsz / .xcz).",
+                                          "That's not a supported game (Pokémon Legends: Arceus).", "The files couldn't be copied.",
+                                          "The game code didn't build.", "The game code builder is missing from this copy.",
+                                          "No keys found for those game files (prod.keys).", "Your keys can't open those game files.",
+-                                         "Only the update was found, not the base game.", "Those game files couldn't be read."};
++                                         "Only the update was found, not the base game.", "Those game files couldn't be read.",
++                                         "That update isn't 1.1.1."};
+         static const char *const pt[] = {"Nenhum arquivo do jogo nessa pasta.", "Esses são arquivos do jogo comprimidos (.nsz / .xcz).",
+                                          "Esse não é um jogo suportado (Pokémon Legends: Arceus).", "Os arquivos não puderam ser copiados.",
+                                          "O código do jogo não compilou.", "O compilador do código do jogo não está nesta cópia.",
+                                          "Nenhuma chave encontrada para esses arquivos (prod.keys).", "As suas chaves não abrem esses arquivos.",
+-                                         "Só a atualização foi encontrada, não o jogo base.", "Esses arquivos do jogo não puderam ser lidos."};
++                                         "Só a atualização foi encontrada, não o jogo base.", "Esses arquivos do jogo não puderam ser lidos.",
++                                         "Essa atualização não é a 1.1.1."};
+         static const char *const en_h[] = {"Choose the folder with your .nsp / .xci files, or the one that holds exefs and romfs.",
+                                            "Decompress them first (nsz -D), or dump them as .nsp / .xci.",
+                                            "Pick the folder of your own Pokémon Legends: Arceus.", "Check there are about 6 GB free and try again.",
+                                            "Check there are about 2 GB free and try again; details in lasrecomp.log.", "Download the release again.",
+-                                           "Dump prod.keys from your own Switch and put it next to the game files (or in .switch in your home folder).",
++                                           "Dump prod.keys from your own Switch (Lockpick_RCM) and pick it above.",
+                                            "Dump prod.keys again from your Switch on its current system version; details in lasrecomp.log.",
+                                            "Put the base game's .nsp / .xci in the same folder as the update.",
+-                                           "The dump may be damaged; details in lasrecomp.log."};
++                                           "The dump may be damaged; details in lasrecomp.log.",
++                                           "Pick the 1.1.1 update of Pokémon Legends: Arceus (the recomp is made for that version only)."};
+         static const char *const pt_h[] = {"Escolha a pasta com os seus arquivos .nsp / .xci, ou a que tem exefs e romfs.",
+                                            "Descomprima antes (nsz -D), ou faça o dump como .nsp / .xci.",
+                                            "Escolha a pasta do seu Pokémon Legends: Arceus.", "Confira se há uns 6 GB livres e tente de novo.",
+                                            "Confira se há uns 2 GB livres e tente de novo; detalhes no lasrecomp.log.", "Baixe a release de novo.",
+-                                           "Faça o dump do prod.keys do seu próprio Switch e coloque junto dos arquivos do jogo (ou em .switch na sua pasta pessoal).",
++                                           "Faça o dump do prod.keys do seu próprio Switch (Lockpick_RCM) e escolha ele acima.",
+                                            "Faça o dump do prod.keys de novo no Switch com a versão atual do sistema; detalhes no lasrecomp.log.",
+                                            "Coloque o .nsp / .xci do jogo base na mesma pasta da atualização.",
+-                                           "O dump pode estar danificado; detalhes no lasrecomp.log."};
++                                           "O dump pode estar danificado; detalhes no lasrecomp.log.",
++                                           "Escolha a atualização 1.1.1 do Pokémon Legends: Arceus (o recomp é feito só para essa versão)."};
+         int k = st - SETUP_FAIL_NOT_FOUND;
++        if (k < 0 || k >= (int)(sizeof en / sizeof *en)) return;
+         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 900);
+         ImGui::TextColored(k_red, "%s", T(en[k], pt[k]));
+         ImGui::TextDisabled("%s", T(en_h[k], pt_h[k]));
+         ImGui::PopTextWrapPos();
++}
++
++static void pickers(SDL_Window *win, int st) {
++    bool failed = st >= SETUP_FAIL_NOT_FOUND && !g_setup_from_folder;
++    static bool keys_looked;  // (prod.keys pre-filled once from the usual places: ~/.switch, the emulators)
++    if (!keys_looked) {
++        keys_looked = true;
++        if (!g_settings.setup_keys[0] && nxpkg_keys_default(g_settings.setup_keys, sizeof g_settings.setup_keys)) settings_save();
++    }
++    static const SDL_DialogFileFilter f_base[] = {{"Base game (.nsp, .xci)", "nsp;xci"}, {"All files", "*"}};
++    static const SDL_DialogFileFilter f_update[] = {{"Update (.nsp)", "nsp"}, {"All files", "*"}};
++    static const SDL_DialogFileFilter f_keys[] = {{"Keys (prod.keys)", "keys;txt;prod"}, {"All files", "*"}};
++    static const SDL_DialogFileFilter *const filters[NPICK] = {f_base, f_update, f_keys};
++    const char *labels[NPICK] = {T("Base game", "Jogo base"), T("Update (1.1.1)", "Atualização (1.1.1)"), "prod.keys"};
++    const char *browse = T("Browse...", "Procurar...");
++    const ImGuiStyle &style = ImGui::GetStyle();
++    float bw = ImGui::CalcTextSize(browse).x + style.FramePadding.x * 2;
++    for (int i = 0; i < NPICK; i++) {
++        ImGui::PushID(i);
++        ImGui::AlignTextToFramePadding();
++        ImGui::TextUnformatted(labels[i]);
++        ImGui::SameLine(200);
++        char *p = pick_path(i);
++        ImGui::SetNextItemWidth(-bw - style.ItemSpacing.x);
++        if (p[0]) {
++            char shown[1024];  // (read-only: changed with Browse...)
++            snprintf(shown, sizeof shown, "%s", p);
++            ImGui::InputText("##path", shown, sizeof shown, ImGuiInputTextFlags_ReadOnly);
++        } else {
++            char none[64];
++            snprintf(none, sizeof none, "%s", T("Not selected", "Não selecionado"));
++            ImGui::BeginDisabled();
++            ImGui::InputText("##path", none, sizeof none, ImGuiInputTextFlags_ReadOnly);
++            ImGui::EndDisabled();
++        }
++        ImGui::SameLine();
++        if (ImGui::Button(browse, ImVec2(bw, 0))) SDL_ShowOpenFileDialog(picked_file, (void *)(intptr_t)i, win, filters[i], 2, NULL, false);
++        if (failed && fail_row(st) == i) fail_text(st);
++        ImGui::PopID();
++    }
++    bool all = is_file_there(g_settings.setup_base) && is_file_there(g_settings.setup_update) && is_file_there(g_settings.setup_keys);
++    ImGui::BeginDisabled(!all);
++    if (ImGui::Button(T("Recompile", "Recompilar"), ImVec2(-FLT_MIN, 0))) {
++        g_setup_from_folder = false;
++        setup_start_files(g_settings.setup_base, g_settings.setup_update, g_settings.setup_keys);
++    }
++    ImGui::EndDisabled();
++    if (!all) ImGui::TextDisabled("%s", T("Pick all three files to recompile.", "Escolha os três arquivos para recompilar."));
++    if (failed && fail_row(st) == NPICK) fail_text(st);
++    if (ImGui::SmallButton(T("Use an extracted dump instead...", "Usar um dump extraído...")))
++        SDL_ShowOpenFolderDialog(picked_game, NULL, win, NULL, false);
++    if (st >= SETUP_FAIL_NOT_FOUND && g_setup_from_folder) fail_text(st);
++}
++
++static void game_files_section(SDL_Window *win) {
++    ImGui::SeparatorText(T("Game files", "Arquivos do jogo"));
++    int st = setup_state();
++    if (setup_running()) {
++        static const char *const en[] = {"", "Looking for the game files...", "Reading the game files out of the packages...", "Copying the game files...",
++                                         "Building the game data image...", "Reading the game code...",
++                                         "Recompiling the game code...", "Finishing..."};
++        static const char *const pt[] = {"", "Procurando os arquivos do jogo...", "Lendo os arquivos do jogo dos pacotes...", "Copiando os arquivos do jogo...",
++                                         "Montando a imagem de dados do jogo...", "Lendo o código do jogo...",
++                                         "Recompilando o código do jogo...", "Finalizando..."};
++        ImGui::TextUnformatted(st >= 1 && st <= 7 ? T(en[st], pt[st]) : "...");
++        ImGui::ProgressBar(setup_progress(), ImVec2(-FLT_MIN, 0));
++        ImGui::TextDisabled("%s", T("This takes a while (10-30 minutes), only once. The game can be played when it's done.",
++                                    "Isso demora (de 10 a 30 minutos), só uma vez. O jogo fica liberado quando terminar."));
++        return;
++    }
++    bool ready = setup_ready();
++    static bool changing;  // (ready, and Change... pressed: the pickers again)
++    if (ready) {
++        const char *name = game_name("extracted/exefs");
++        ImGui::TextColored(k_green, g_pt ? "Pokémon %s - pronto para jogar" : "Pokémon %s - ready to play",
++                           name ? name : "Legends: Arceus");
++        ImGui::SameLine();
++        if (ImGui::SmallButton(changing ? T("Keep these", "Manter estes") : T("Change...", "Trocar..."))) changing = !changing;
++        if (!changing && st < SETUP_FAIL_NOT_FOUND) return;  // (a failed change: why, below - the game files set up before still play)
+     } else {
+         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 900);
+-        ImGui::TextUnformatted(T("Select the folder with your own Pokémon Legends: Arceus: the dumped base game and update "
+-                                 "(.nsp / .xci, with your prod.keys), or the extracted exefs and romfs.",
+-                                 "Selecione a pasta com o seu Pokémon Legends: Arceus: o dump do jogo base e da atualização "
+-                                 "(.nsp / .xci, com o seu prod.keys), ou o exefs e o romfs extraídos."));
++        ImGui::TextUnformatted(T("Pick your own Pokémon Legends: Arceus, dumped from your Switch: the base game (.nsp / .xci), "
++                                 "its 1.1.1 update (.nsp) and your prod.keys. Then Recompile: the game code is built for this "
++                                 "PC once.",
++                                 "Escolha o seu Pokémon Legends: Arceus, com dump do seu Switch: o jogo base (.nsp / .xci), a "
++                                 "atualização 1.1.1 (.nsp) e o seu prod.keys. Depois Recompilar: o código do jogo é compilado "
++                                 "para este PC uma vez."));
+         ImGui::PopTextWrapPos();
+     }
+-    if (!ready && ImGui::Button(T("Select game folder...", "Selecionar pasta do jogo..."), ImVec2(-FLT_MIN, 0)))
+-        SDL_ShowOpenFolderDialog(picked_game, NULL, win, NULL, false);
++    pickers(win, st);
+ }
+ 
+ // ------------------------------------------------------------------ the launcher's look
+@@ -988,7 +1077,7 @@ extern "C" void launcher_lg_run(const char *root) {
+     }
+     const char *keys_test = getenv("LARECOMP_LAUNCHER_KEYS");
+     if (keys_test && atoi(keys_test) > 0) bind_capture_begin(BIND_DEV_KEY, atoi(keys_test));
+-    if (getenv("LARECOMP_SETUP_DIR")) setup_start(getenv("LARECOMP_SETUP_DIR"));
++    if (getenv("LARECOMP_SETUP_DIR")) g_setup_from_folder = true, setup_start(getenv("LARECOMP_SETUP_DIR"));
+     if (getenv("LARECOMP_MOD_INSTALL")) mod_install_start(getenv("LARECOMP_MOD_INSTALL"));
+     static const float bg[4] = {0.08f, 0.08f, 0.10f, 1};
+ #ifdef _WIN32
+@@ -1475,7 +1564,9 @@ extern "C" void launcher_lg_run(const char *root) {
+             if (e.type == SDL_EVENT_QUIT) exit(0);
+         }
+         char path[1024];
+-        if (take(g_pick_game, path, sizeof path)) setup_start(path);
++        if (take(g_pick_game, path, sizeof path)) g_setup_from_folder = true, setup_start(path);
++        for (int i = 0; i < NPICK; i++)
++            if (take(g_pick_file[i], path, sizeof path)) snprintf(pick_path(i), pick_size(i), "%s", path), settings_save();
+         if (take(g_pick_mod, path, sizeof path)) {
+             if (add_plugin(path, mod_msg, sizeof mod_msg)) {  // (a plugin: into plugins/, ticked)
+                 plugins_refresh();
+-- 
+2.56.0
+

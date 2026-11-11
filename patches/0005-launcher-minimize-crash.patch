@@ -1,0 +1,30 @@
+From 3d1bff281271dae5c0b0c25cd7cb3a925cd1ce69 Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 20:32:43 -0500
+Subject: [PATCH] Launcher: no crash when minimized on the home page
+
+A minimized window is 0 wide, so the banner's summit (half width w * 0.05)
+divided 0 by 0: the NaN became the index of its rim array (INT_MIN), an
+out-of-bounds read, SIGSEGV in banner()'s rim_y. The banner draws nothing
+for an empty area.
+---
+ runtime/ui/launcher_lg.mm | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/runtime/ui/launcher_lg.mm b/runtime/ui/launcher_lg.mm
+index 1524416..dd701a8 100644
+--- a/runtime/ui/launcher_lg.mm
++++ b/runtime/ui/launcher_lg.mm
+@@ -749,6 +749,9 @@ static void rift(ImDrawList *d, float cx, float cy, float rx, float t) {
+ // The launcher's banner: Mount Coronet at dusk under the rift, drawn as the Prism Tower is in Z-A's (a dark shape,
+ // glowing outlines): the cone with its broken summit, the snowcap's ragged edge and the gullies, foothills in front
+ static void banner(ImDrawList *d, ImVec2 a, ImVec2 b, float t) {
++    // (a minimized window is 0 wide: the shapes below divide by the width - the summit's rim index became NaN, then an
++    // out-of-bounds read, and the launcher crashed when minimized on its home page)
++    if (b.x - a.x < 2 || b.y - a.y < 2) return;
+     d->PushClipRect(a, b, true);
+     banner_sky(d, a, b);
+     const ImU32 fill = IM_COL32(26, 20, 40, 255), c = IM_COL32(240, 196, 92, 235), dim = IM_COL32(200, 160, 80, 110),
+-- 
+2.56.0
+

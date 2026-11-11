@@ -1,4 +1,4 @@
-From 3b41ac2266b812246b112d0788ec17afb2a1d0f5 Mon Sep 17 00:00:00 2001
+From 9b0ebb4bdb08f24f5b387c9658156eaddbaf0641 Mon Sep 17 00:00:00 2001
 From: linuxopt <305337987+linuxopt@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:14:50 +0000
 Subject: [PATCH] =?UTF-8?q?Cheats:=20Atmosph=C3=A8re=20cheat=20files,=20th?=
@@ -17,16 +17,19 @@ skipped. Launcher: a Cheats tab on the Mods page (import, tick boxes, code patch
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_014bAdkhrwPomwAxUjaHneaX
 ---
- runtime/cheats.c          | 564 ++++++++++++++++++++++++++++++++++++++
- runtime/cheats.h          |  71 +++++
- runtime/hle/cheats_rt.c   |  96 +++++++
- runtime/hle/input.c       |   1 +
- runtime/main.c            |   1 +
- runtime/ui/launcher_lg.mm | 136 ++++++++-
- 6 files changed, 865 insertions(+), 4 deletions(-)
+ runtime/cheats.c             | 564 +++++++++++++++++++++++++++++++++++
+ runtime/cheats.h             |  71 +++++
+ runtime/hle/cheats_rt.c      |  96 ++++++
+ runtime/hle/input.c          |   1 +
+ runtime/main.c               |   1 +
+ runtime/miniz_rt.c           |  11 +
+ runtime/nvn/vulkan/texpack.c |  13 +-
+ runtime/ui/launcher_lg.mm    | 136 ++++++++-
+ 8 files changed, 877 insertions(+), 16 deletions(-)
  create mode 100644 runtime/cheats.c
  create mode 100644 runtime/cheats.h
  create mode 100644 runtime/hle/cheats_rt.c
+ create mode 100644 runtime/miniz_rt.c
 
 diff --git a/runtime/cheats.c b/runtime/cheats.c
 new file mode 100644
@@ -801,6 +804,47 @@ index 9089302..9bf409e 100644
      if (!g_oodle_server && !g_extract_shaders && !g_build_trees) { extern void pkm_link_apply(void); pkm_link_apply(); }  // (PKHeX Link, if on: hle/pkm_link.c)
      kernel_init();
      dispatch_init();
+diff --git a/runtime/miniz_rt.c b/runtime/miniz_rt.c
+new file mode 100644
+index 0000000..6301bed
+--- /dev/null
++++ b/runtime/miniz_rt.c
+@@ -0,0 +1,11 @@
++// miniz, built once for the runtime: texture packs (nvn/vulkan/texpack.c: PNG data) and the cheats (cheats.c: a cheat
++// database's zip). (patches/0006: texpack.c had its own copy, without the archive functions.)
++#if defined(__clang__) || defined(__GNUC__)
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wall"
++#pragma GCC diagnostic ignored "-Wextra"
++#endif
++#include "miniz/miniz.c"
++#if defined(__clang__) || defined(__GNUC__)
++#pragma GCC diagnostic pop
++#endif
+diff --git a/runtime/nvn/vulkan/texpack.c b/runtime/nvn/vulkan/texpack.c
+index 5097b07..d0c93d8 100644
+--- a/runtime/nvn/vulkan/texpack.c
++++ b/runtime/nvn/vulkan/texpack.c
+@@ -26,18 +26,7 @@
+ #include "../../rt.h"
+ #include "../../mods.h"
+ 
+-#define MINIZ_NO_STDIO
+-#define MINIZ_NO_ARCHIVE_APIS
+-#define MINIZ_NO_TIME
+-#if defined(__clang__) || defined(__GNUC__)
+-#pragma GCC diagnostic push
+-#pragma GCC diagnostic ignored "-Wall"
+-#pragma GCC diagnostic ignored "-Wextra"
+-#endif
+-#include "miniz/miniz.c"
+-#if defined(__clang__) || defined(__GNUC__)
+-#pragma GCC diagnostic pop
+-#endif
++#include "miniz/miniz.h"  // (built once for the runtime: runtime/miniz_rt.c - the cheats read zips with it too)
+ 
+ typedef struct { uint64_t key; char *path; bool dds; int prio; } Ent;  // (prio: the mod's place in the load order)
+ static Ent *g_ent;
 diff --git a/runtime/ui/launcher_lg.mm b/runtime/ui/launcher_lg.mm
 index ef157bd..a66c50b 100644
 --- a/runtime/ui/launcher_lg.mm

@@ -555,6 +555,24 @@ static int variants_cave_file(void) {  // the variants file has the cave too, an
     return ok;
 }
 
+static int prepare_stale_list(void) {  // a list made by an older version (other contents): made again
+    int ok = 1;
+    fresh_tmp();
+    exefs_with_build(PLA_111);
+    uint8_t text_size[4] = {0x00, 0x40, 0x00, 0x00};
+    FILE *f = fopen("extracted/exefs/main", "r+b");
+    fseek(f, 0x18, SEEK_SET), fwrite(text_size, 1, 4, f), fclose(f);
+    mkdir("cheats", 0755);
+    write_file("cheats/AEE8F150DDA1B5A8.txt", CODE_TEXT, strlen(CODE_TEXT));
+    sleep(1);  // (the stale list is newer than the cheat file, as after an update of the AppImage)
+    write_file("cheats/AEE8F150DDA1B5A8.variants.json", "{\"code\": {}}\n", 13);
+    char h1[17], h2[17];
+    CHECK(cheats_variants_hash("extracted/exefs", h1));
+    CHECK(cheats_prepare("extracted/exefs"));
+    CHECK(cheats_variants_hash("extracted/exefs", h2) && strcmp(h1, h2));  // (made again: the real list)
+    return ok;
+}
+
 int main(void) {
     struct { const char *name; int (*fn)(void); } tests[] = {
         {"parse_file", parse_file}, {"op0_store_static", op0_store_static}, {"op0_code_blocked", op0_code_blocked},
@@ -567,6 +585,7 @@ int main(void) {
         {"vm_code_redirect", vm_code_redirect}, {"code_built_list", code_built_list},
         {"prepare_copied_file", prepare_copied_file}, {"variants_offset_register", variants_offset_register},
         {"variants_cave", variants_cave}, {"variants_cave_file", variants_cave_file},
+        {"prepare_stale_list", prepare_stale_list},
     };
     for (size_t i = 0; i < sizeof tests / sizeof *tests; i++) {
         g_run++;

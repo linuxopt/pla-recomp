@@ -1,4 +1,4 @@
-From 64afa5aadd7bcd26d02802d669e4d4d62ee26eb3 Mon Sep 17 00:00:00 2001
+From 18c65a1f43ece074cb48b3c8c1df8b7becf8ea4d Mon Sep 17 00:00:00 2001
 From: linuxopt <305337987+linuxopt@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 22:55:54 -0500
 Subject: [PATCH] Code cheats: offset-register writes and code caves
@@ -14,15 +14,15 @@ as compiled in. The cheat runner treats main's code, the gap after it and its
 read-only data as never writable (a cave's page may be read-only). On the
 GBAtemp 1.1.1 file: 122 words at 54 addresses + a 15-word cave, none left out.
 ---
- runtime/cheats.c          | 73 +++++++++++++++++++++++++++++++++------
- runtime/cheats.h          | 14 ++++++--
- runtime/hle/cheats_rt.c   |  8 +++--
- runtime/ui/launcher_lg.mm |  8 ++---
- tools/gen.py              | 25 ++++++++++++++
- 5 files changed, 107 insertions(+), 21 deletions(-)
+ runtime/cheats.c          | 88 +++++++++++++++++++++++++++++++--------
+ runtime/cheats.h          | 14 +++++--
+ runtime/hle/cheats_rt.c   |  8 ++--
+ runtime/ui/launcher_lg.mm |  8 ++--
+ tools/gen.py              | 25 +++++++++++
+ 5 files changed, 115 insertions(+), 28 deletions(-)
 
 diff --git a/runtime/cheats.c b/runtime/cheats.c
-index 07f16c1..70cb4a3 100644
+index 07f16c1..d7a8d01 100644
 --- a/runtime/cheats.c
 +++ b/runtime/cheats.c
 @@ -369,33 +369,61 @@ bool cheat_patches_code(const Cheat *c, uint64_t code_lo, uint64_t code_hi) {
@@ -123,7 +123,7 @@ index 07f16c1..70cb4a3 100644
      if (n == 0) {  // (no code cheats: no list - nothing for the game code to be rebuilt for)
          free(v);
          return remove(p) == 0 || errno == ENOENT;
-@@ -550,15 +594,22 @@ static bool write_variants(const char *exefs, const char *text) {
+@@ -550,17 +594,28 @@ static bool write_variants(const char *exefs, const char *text) {
      char *j = malloc(cap);
      if (!j) { free(v); return false; }
      k += (size_t)snprintf(j + k, cap - k, "{\"code\": {");
@@ -147,9 +147,16 @@ index 07f16c1..70cb4a3 100644
 +        if (v[i].cave)
 +            k += (size_t)snprintf(j + k, cap - k, "%s\"0x%llx\": \"0x%08x\"", entries++ ? ", " : "", (unsigned long long)v[i].off, v[i].word);
      k += (size_t)snprintf(j + k, cap - k, "}}\n");
-     bool ok = write_atomic(p, j, k);
+-    bool ok = write_atomic(p, j, k);
++    size_t had_n = 0;
++    char *had = slurp(p, &had_n);  // (the same list already there: left as it is - its time and hash stay)
++    bool same = had && had_n == k && !memcmp(had, j, k);
++    free(had);
++    bool ok = same || write_atomic(p, j, k);
      free(j), free(v);
-@@ -719,10 +770,10 @@ int cheats_code_load(const char *exefs, const char *list_path, uint64_t main_bas
+     return ok;
+ }
+@@ -719,10 +774,10 @@ int cheats_code_load(const char *exefs, const char *list_path, uint64_t main_bas
      return n;
  }
  
@@ -163,6 +170,23 @@ index 07f16c1..70cb4a3 100644
      for (int i = 0; i < n; i++) {
          int s = site_find(main_base + v[i].off, false);
          if (s < 0) return false;
+@@ -733,13 +788,10 @@ bool cheat_code_supported(const Cheat *c, uint64_t main_base, uint64_t code_lo,
+     return true;
+ }
+ 
+-bool cheats_prepare(const char *exefs) {
+-    char txt[PATH_MAX], var[PATH_MAX];
+-    struct stat t, v;
++bool cheats_prepare(const char *exefs) {  // (the list worked out again and compared: a file copied in, or a list an
++    char txt[PATH_MAX];                    //  older version made - write_variants writes only when it differs)
++    struct stat t;
+     if (!cheat_path(exefs, ".txt", txt, sizeof txt, false) || stat(txt, &t) != 0) return true;  // (no cheats: nothing to do)
+-    if (cheats_variants_path(exefs, var, sizeof var) && stat(var, &v) == 0 &&
+-        v.st_mtime >= t.st_mtime)  // (st_mtime: Windows' C runtime has no nanoseconds)
+-        return true;  // (up to date)
+     char *text = slurp(txt, NULL);
+     if (!text) return false;
+     bool ok = write_variants(exefs, text);
 diff --git a/runtime/cheats.h b/runtime/cheats.h
 index 7a29afa..1fa17ff 100644
 --- a/runtime/cheats.h

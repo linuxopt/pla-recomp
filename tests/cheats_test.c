@@ -623,6 +623,41 @@ static int cave_code_vs_data(void) {  // in the gap: words reached as code are c
     return ok;
 }
 
+static int off_partners(void) {  // the database's on / off pairs, by name: an "off" cheat and the cheat it turns off
+    int ok = 1;
+    const char *t =
+        "[01# Inf Health]\n04000000 00001000 00000001\n"           // 0
+        "[Inf Health (off)]\n04000000 00001000 00000000\n"         // 1 -> 0
+        "[Shiny Pokemon Off]\n04000000 00001000 00000000\n"        // 2 -> 3
+        "[Shiny Pokemon On]\n04000000 00001000 00000001\n"         // 3
+        "[(ON) Only Fake Alpha Pokemon v1.1.1]\n04000000 00001000 00000001\n"   // 4
+        "[(OFF) Only Fake Alpha Pokemon v1.1.1]\n04000000 00001000 00000000\n"  // 5 -> 4
+        "[Six Efforts 10 - OFF]\n04000000 00001000 00000000\n"     // 6 -> 7
+        "[Six Efforts 10]\n04000000 00001000 00000001\n"           // 7
+        "[Encounter Hisuian Form]\n04000000 00001000 00000001\n"   // 8
+        "[Encounter Lord Hisuian]\n04000000 00001000 00000002\n"   // 9
+        "[Encounter Hisuian(off)]\n04000000 00001000 00000000\n"   // 10 -> 8
+        "[Always Encounter (M)]\n04000000 00001000 00000001\n"     // 11
+        "[Always Encounter Off]\n04000000 00001000 00000000\n"     // 12 -> 11
+        "[Inf. PP (On)]\n04000000 00001000 00000001\n"             // 13
+        "[Inf. PP (Off)]\n04000000 00001000 00000000\n"            // 14 -> 13
+        "[03# 900 Items When Use]\n04000000 00001000 00000001\n"   // 15
+        "[900 Items When Use (off)]\n04000000 00001000 00000000\n" // 16 -> 15
+        "[Max Pocket Size]\n04000000 00001000 00000001\n"          // 17
+        "[Max Pocket Size Off]\n04000000 00001000 00000000\n"      // 18 -> 17
+        "[Take Off Hat]\n04000000 00001000 00000001\n";            // 19 ("Off" inside a name, no partner)
+    CheatList l;
+    CHECK(cheats_parse(t, &l) && l.n == 20);
+    static const int want[20] = {-1, 0, 3, -1, -1, 4, 7, -1, -1, -1, 8, -1, 11, -1, 13, -1, 15, -1, 17, -1};
+    for (int i = 0; i < l.n && i < 20; i++) {
+        int got = cheats_off_partner(&l, i);
+        if (got != want[i]) printf("  cheat %d \"%s\": partner %d, want %d\n", i, l.c[i].name, got, want[i]);
+        CHECK(got == want[i]);
+    }
+    cheats_free(&l);
+    return ok;
+}
+
 int main(void) {
     struct { const char *name; int (*fn)(void); } tests[] = {
         {"parse_file", parse_file}, {"op0_store_static", op0_store_static}, {"op0_code_blocked", op0_code_blocked},
@@ -636,7 +671,7 @@ int main(void) {
         {"prepare_copied_file", prepare_copied_file}, {"variants_offset_register", variants_offset_register},
         {"variants_cave", variants_cave}, {"variants_cave_file", variants_cave_file},
         {"prepare_stale_list", prepare_stale_list}, {"runnable_master", runnable_master},
-        {"cave_code_vs_data", cave_code_vs_data},
+        {"cave_code_vs_data", cave_code_vs_data}, {"off_partners", off_partners},
     };
     for (size_t i = 0; i < sizeof tests / sizeof *tests; i++) {
         g_run++;

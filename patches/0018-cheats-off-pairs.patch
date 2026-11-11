@@ -1,0 +1,150 @@
+From 66ca541463a826ca7be57f2d1c9f6c8880d83fb3 Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 23:52:10 -0500
+Subject: [PATCH] Cheats: a database's "off" cheats are shown as not needed,
+ and left out
+
+Cheat databases pair cheats with an "off" one ("Inf Health" / "Inf Health
+(off)", "(ON) X" / "(OFF) X", "X On" / "X Off") because on a Switch a code
+patch stays until something writes the original back. Here cheats apply from
+the game's next start, so unticking one turns it off; ticking an "off" cheat
+(easy to do: they look alike) undid its partner - Inf Health never held.
+cheats_off_partner() pairs them by name; the Cheats tab shows the "off" one
+as not needed (untick the other), and the runner leaves it out.
+---
+ runtime/cheats.c          | 45 +++++++++++++++++++++++++++++++++++++++
+ runtime/cheats.h          |  5 +++++
+ runtime/hle/cheats_rt.c   |  5 +++++
+ runtime/ui/launcher_lg.mm | 15 ++++++++++++-
+ 4 files changed, 69 insertions(+), 1 deletion(-)
+
+diff --git a/runtime/cheats.c b/runtime/cheats.c
+index d6bf718..2f9ea9c 100644
+--- a/runtime/cheats.c
++++ b/runtime/cheats.c
+@@ -858,3 +858,48 @@ bool cheat_runnable(const Cheat *c, uint64_t main_base, uint64_t code_lo, uint64
+ }
+ 
+ bool cheat_code_site(uint64_t addr) { return site_find(addr, false) >= 0; }
++
++// A cheat's name as words for pairing: lower case, a leading "01#" number dropped, "on" / "off" taken out (*off: "off"
++// was one of them)
++static void name_base(const char *name, char *out, size_t n, bool *off) {
++    *off = false;
++    const char *p = name;
++    while (*p == ' ') p++;
++    const char *q = p;
++    while (*q >= '0' && *q <= '9') q++;
++    if (q > p && *q == '#') p = q + 1;
++    size_t k = 0;
++    out[0] = 0;
++    while (*p) {
++        char w[64];
++        size_t wl = 0;
++        while (*p && !isalnum((unsigned char)*p)) p++;
++        while (*p && isalnum((unsigned char)*p) && wl + 1 < sizeof w) w[wl++] = (char)tolower((unsigned char)*p++);
++        while (*p && isalnum((unsigned char)*p)) p++;
++        w[wl] = 0;
++        if (!wl) continue;
++        if (!strcmp(w, "off")) { *off = true; continue; }
++        if (!strcmp(w, "on")) continue;
++        if (k + wl + 2 > n) break;
++        if (k) out[k++] = ' ';
++        memcpy(out + k, w, wl), k += wl, out[k] = 0;
++    }
++}
++
++int cheats_off_partner(const CheatList *l, int i) {
++    if (i < 0 || i >= l->n) return -1;
++    char base[CHEAT_NAME_MAX * 2], other[CHEAT_NAME_MAX * 2];
++    bool off, other_off;
++    name_base(l->c[i].name, base, sizeof base, &off);
++    if (!off || !base[0]) return -1;
++    int prefix = -1, prefixes = 0;
++    size_t bl = strlen(base);
++    for (int j = 0; j < l->n; j++) {
++        if (j == i || l->c[j].master || !l->c[j].nop) continue;
++        name_base(l->c[j].name, other, sizeof other, &other_off);
++        if (other_off) continue;
++        if (!strcmp(other, base)) return j;  // (the same words: the pair)
++        if (!strncmp(other, base, bl) && other[bl] == ' ') prefix = j, prefixes++;  // ("Encounter Hisuian Form")
++    }
++    return prefixes == 1 ? prefix : -1;
++}
+diff --git a/runtime/cheats.h b/runtime/cheats.h
+index 71e76ca..a501f2d 100644
+--- a/runtime/cheats.h
++++ b/runtime/cheats.h
+@@ -115,3 +115,8 @@ bool cheats_prepare(const char *exefs);
+ // too - its hook switched on without its cave would jump into nothing (patches/0014).
+ bool cheat_runnable(const Cheat *c, uint64_t main_base, uint64_t code_lo, uint64_t code_hi, uint64_t gap_hi);
+ bool cheat_code_site(uint64_t addr);  // a compiled-in variant's (or a cave's code word's) address
++// The cheat databases' on / off pairs ("Inf Health" / "Inf Health (off)", "(ON) X" / "(OFF) X", "X On" / "X Off"...):
++// cheat i is an "off" cheat and this is the cheat it turns off (its index), or -1. Here cheats apply from the game's
++// next start, so unticking a cheat already turns it off: an "off" cheat is never needed, and run with its partner it
++// undoes it - the launcher shows it as not needed and the runner leaves it out (patches/0018).
++int cheats_off_partner(const CheatList *l, int i);
+diff --git a/runtime/hle/cheats_rt.c b/runtime/hle/cheats_rt.c
+index d01911f..b8579f5 100644
+--- a/runtime/hle/cheats_rt.c
++++ b/runtime/hle/cheats_rt.c
+@@ -76,6 +76,11 @@ void cheats_rt_load(const char *exefs) {
+             continue;
+         }
+         if (!cheats_is_on(exefs, c->name)) continue;
++        int partner = cheats_off_partner(&l, i);  // (an "off" cheat: unticking its partner turns that off here - run with
++        if (partner >= 0) {                       //  it, it would undo it: left out)
++            LOG("[cheats] \"%s\" left out: unticking \"%s\" turns it off\n", c->name, l.c[partner].name);
++            continue;
++        }
+         if (!runnable) {
+             LOG("[cheats] \"%s\" changes the game's code, and the game code wasn't built with it: skipped\n", c->name);
+             continue;
+diff --git a/runtime/ui/launcher_lg.mm b/runtime/ui/launcher_lg.mm
+index c3e6a57..7cb8e78 100644
+--- a/runtime/ui/launcher_lg.mm
++++ b/runtime/ui/launcher_lg.mm
+@@ -514,6 +514,7 @@ static void cheats_section(SDL_Window *win) {
+     static const char *const ex = "extracted/exefs";
+     static CheatList list;
+     static std::vector<char> on, code, ready;  // (per cheat: on; patches the game's code; that code is compiled in)
++    static std::vector<int> off_of;            // (an "off" cheat: the cheat it turns off - not needed here, patches/0018)
+     static bool stale = true, msg_bad, built;  // (built: the game code has this cheat file's code cheats - patches/0010)
+     static char msg[320];
+     char bid[17], picked[1024];
+@@ -537,12 +538,13 @@ static void cheats_section(SDL_Window *win) {
+         uint64_t lo = 0, hi = 0, ro = 0;
+         bool text = have_game && cheats_main_layout(ex, &lo, &hi, &ro);
+         built = have_game && cheats_code_load(ex, "extracted/" GAMELIB_NAME ".variants", 0) >= 0;
+-        ready.clear();
++        ready.clear(), off_of.clear();
+         if (have_game && cheats_load(ex, &list) > 0)
+             for (int i = 0; i < list.n; i++) {
+                 on.push_back(cheats_is_on(ex, list.c[i].name));
+                 code.push_back(text && cheat_patches_code(&list.c[i], lo, ro));  // (its code, or a cave after it)
+                 ready.push_back(built && cheat_code_supported(&list.c[i], 0, lo, hi, ro));
++                off_of.push_back(cheats_off_partner(&list, i));
+             }
+     }
+     static bool was_running;  // (a rebuild just ended: what's compiled in is read again)
+@@ -607,6 +609,17 @@ static void cheats_section(SDL_Window *win) {
+             ImGui::Spacing();
+             ImGui::TextColored(ImVec4(0.94f, 0.77f, 0.36f, 1), "%s", c->name);  // (a section label, or an empty cheat)
+         } else {
++            if (off_of[i] >= 0) {  // (an "off" cheat: here unticking its partner turns that off - this one isn't needed)
++                bool v = false;
++                ImGui::BeginDisabled();
++                ImGui::Checkbox(c->name, &v);
++                ImGui::EndDisabled();
++                ImGui::SameLine();
++                ImGui::TextDisabled(T("(not needed here: untick \"%s\" to turn it off)", "(não precisa aqui: desmarque \"%s\" para desligar)"),
++                                    list.c[off_of[i]].name);
++                ImGui::PopID();
++                continue;
++            }
+             bool v = on[i] != 0, waiting = code[i] && !ready[i];
+             ImGui::BeginDisabled(waiting);
+             if (ImGui::Checkbox(c->name, &v)) cheats_set_on(ex, c->name, v), on[i] = v;
+-- 
+2.56.0
+

@@ -112,6 +112,8 @@ scenes, but if a scripted scene ever stalls, set 60 or 30 fps in the game's Sett
 - **Import cheats...** takes another Atmosphère cheat file for 1.1.1 (`AEE8F150DDA1B5A8.txt`) or a cheat database's
   `.zip` (the file for this version is taken out of it). Your own import is never replaced by the bundled file, and if
   you delete the bundled file it stays deleted.
+- Cheat databases come with "off" twins ("Inf Health (off)", "(OFF) …", "… Off"). You don't need them here: to turn a
+  cheat off, untick it. The launcher greys the twins out and says which cheat to untick instead.
 - **Back up your save first** (`~/.local/share/plarecomp/save/`). Cheats change the game's memory directly.
 
 ## Mods and plugins
@@ -204,6 +206,7 @@ Applied in order on top of upstream `LegendsA` at `bc830dd` (v1.2.0-rc1):
 | `0015-code-cave-data` | a cave's code is what control flow reaches from the cheats' branches; the rest is the cave's data, written to memory (Inf Health) |
 | `0016-gen-variant-branch-targets` | a code variant's branch target becomes a function start (else the game code wouldn't load) |
 | `0017-setup-part-files` | the game data images are written as `.part` and renamed when complete: a setup cut short isn't taken as set up |
+| `0018-cheats-off-pairs` | a database's "off" cheats (`X (off)`, `(OFF) X`, `X Off`) are paired with their cheat by name, shown as not needed and left out (ticked with their partner, they undid it) |
 
 Moving to a newer upstream: change `PIN_UPSTREAM_COMMIT` in `pins.env` and rebuild. A patch that no longer applies
 stops the build with its name: refresh it in `work/src` (edit, `git commit`, `git format-patch -1`).

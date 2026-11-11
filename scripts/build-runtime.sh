@@ -12,6 +12,8 @@ rm -rf work/src
 mkdir -p work
 git clone --quiet cache/upstream work/src
 git -C work/src checkout --quiet --detach "$PIN_UPSTREAM_COMMIT"
+# (the identity patches are made with in work/src - edit, commit, git format-patch -1: the GitHub no-reply address)
+git -C work/src config user.name linuxopt && git -C work/src config user.email 305337987+linuxopt@users.noreply.github.com
 export GIT_COMMITTER_NAME="PLA AppImage build" GIT_COMMITTER_EMAIL="build@localhost"
 for p in patches/*.patch; do
     git -C work/src am --quiet --keep-cr "$PWD/$p" || { git -C work/src am --abort || true; die "patch $(basename "$p") does not apply"; }

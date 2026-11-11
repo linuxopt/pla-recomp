@@ -76,6 +76,11 @@ The runtime's generator lookup is `python/python` + `gen/gen.py`; on Linux the p
 `python/bin/python3`, so the AppDir gets a `python/python` symlink to it. The runtime runs `python gen/gen.py` (no
 `-I`); that is safe because `gen/` holds only the seven upstream scripts we copy, so nothing can shadow a module.
 
+Upstream reads `plugins/` and `mods/` only from the data root (on Windows that is the exe's folder). So AppRun seeds
+them on every start: plugins copied when missing or changed, each mod folder copied only if it isn't there yet (Lush
+Foliage writes its built trees into its own folder), Lua examples copied when missing. `larecomp.ini` is never
+touched, so everything stays off.
+
 Data (writable) stays where upstream already puts it on Linux: `$XDG_DATA_HOME/plarecomp` (`~/.local/share/plarecomp`):
 `extracted/` (exefs, romfs.bin, `lasgame.so`), `save/`, `cache/`, `mods/`, `plugins/` state, `larecomp.ini`, logs.
 
@@ -170,3 +175,6 @@ Host entry point `./build.sh` (needs podman; runs rootless). Everything else hap
 ## Out of scope
 
 Z-A; a Windows build (upstream has one); shipping any game data; changes to the recompiler itself.
+
+When Z-A is built later, all of it (game files, build project, AppImage) goes in its own separate folder, not in
+`PLA/` or `PLA/appimage-build/` — nothing here should be written to be shared with it.

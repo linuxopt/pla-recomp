@@ -131,22 +131,25 @@ static int default_switch(void) {
 }
 
 // ---- patch 0002: the 1.1.1 check, the saved picker paths
-static void write_exefs(const uint8_t build_id[8], uint64_t program) {
-    char dir[PATH_MAX], p[PATH_MAX];
-    path(dir, "exefs");
+static void write_exefs_in(const char *sub, const uint8_t build_id[8], uint64_t program) {  // <tmp>/<sub>/exefs
+    char dir[PATH_MAX], p[PATH_MAX], base[PATH_MAX];
+    path(base, sub);
+    mkdir(base, 0755);
+    snprintf(dir, sizeof dir, "%s/exefs", base);
     mkdir(dir, 0755);
     uint8_t main_nso[0x60] = {'N', 'S', 'O', '0'};
     memcpy(main_nso + 0x40, build_id, 8);
-    path(p, "exefs/main");
+    snprintf(p, sizeof p, "%s/main", dir);
     write_file(p, main_nso, sizeof main_nso);
     uint8_t npdm[0x98] = {'M', 'E', 'T', 'A'};
     uint32_t aci_off = 0x80;
     memcpy(npdm + 0x70, &aci_off, 4);
     memcpy(npdm + 0x80, "ACI0", 4);
     memcpy(npdm + 0x90, &program, 8);
-    path(p, "exefs/main.npdm");
+    snprintf(p, sizeof p, "%s/main.npdm", dir);
     write_file(p, npdm, sizeof npdm);
 }
+static void write_exefs(const uint8_t build_id[8], uint64_t program) { write_exefs_in(".", build_id, program); }
 static const uint8_t PLA_111[8] = {0xae, 0xe8, 0xf1, 0x50, 0xdd, 0xa1, 0xb5, 0xa8};
 
 static int pla111_yes(void) {
@@ -190,11 +193,48 @@ static int settings_roundtrip(void) {
     return ok;
 }
 
+// ---- patch 0004: game files set up, game code missing or built by another version -> rebuilt
+extern bool g_stub_gamelib_present;  // (tests/unit_stubs.c: what gamelib_present answers)
+static void set_up_game_files(void) {  // <tmp>/extracted: exefs (Arceus 1.1.1) + romfs.bin, as a setup leaves them
+    char p[PATH_MAX];
+    write_exefs_in("extracted", PLA_111, 0x01001F5010DFA000ull);
+    path(p, "extracted/romfs.bin");
+    write_zeros(p, 64);
+    if (chdir(g_tmp) != 0) exit(2);
+}
+
+static int needs_code_stale(void) {
+    int ok = 1;
+    set_up_game_files();
+    g_stub_gamelib_present = false;  // (no library, or one with another id)
+    CHECK(setup_needs_code());
+    CHECK(!setup_ready());
+    return ok;
+}
+
+static int needs_code_ready(void) {
+    int ok = 1;
+    set_up_game_files();
+    g_stub_gamelib_present = true;
+    CHECK(!setup_needs_code());
+    CHECK(setup_ready());
+    return ok;
+}
+
+static int needs_code_nothing(void) {
+    int ok = 1;
+    if (chdir(g_tmp) != 0) return 0;  // (no extracted/: never set up - the pickers, not a rebuild)
+    g_stub_gamelib_present = false;
+    CHECK(!setup_needs_code());
+    return ok;
+}
+
 int main(void) {
     struct { const char *name; int (*fn)(void); } tests[] = {
         {"no_keys", no_keys}, {"no_game", no_game}, {"files_spaces", files_spaces}, {"files_order", files_order},
         {"default_none", default_none}, {"default_switch", default_switch},
         {"pla111_yes", pla111_yes}, {"pla111_other_build", pla111_other_build}, {"settings_roundtrip", settings_roundtrip},
+        {"needs_code_stale", needs_code_stale}, {"needs_code_ready", needs_code_ready}, {"needs_code_nothing", needs_code_nothing},
     };
     for (size_t i = 0; i < sizeof tests / sizeof *tests; i++) {
         fresh_tmp();  // (each test in its own folder: none sees another's files)

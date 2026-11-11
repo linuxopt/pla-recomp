@@ -8,11 +8,13 @@
 bool bind_settings_load(const char *key, const char *val) { (void)key, (void)val; return false; }
 void bind_settings_save(FILE *f) { (void)f; }
 
+bool g_stub_gamelib_present;  // (the game library's presence, as the test sets it)
+bool gamelib_present(const char *game_dir) { (void)game_dir; return g_stub_gamelib_present; }
+
 #define NOT_IN_TESTS(name) \
     void name(void) { fprintf(stderr, "unit: %s called (a stub)\n", #name); abort(); }
 NOT_IN_TESTS(gamebuild_available)
 NOT_IN_TESTS(gamebuild_run)
-NOT_IN_TESTS(gamelib_present)
 NOT_IN_TESTS(plat_remove_tree)
 NOT_IN_TESTS(romfs_build)
 NOT_IN_TESTS(romfs_copy_file)

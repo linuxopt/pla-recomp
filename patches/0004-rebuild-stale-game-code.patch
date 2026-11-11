@@ -1,0 +1,66 @@
+From 3b6f82b4f4a9d58a147bcaf3d7abbd9ab2513227 Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 20:24:17 -0500
+Subject: [PATCH] Launcher: game code built again when only it is missing or
+ outdated
+
+With the game files set up (exefs, romfs.bin) but no game library built by this
+version - an AppImage whose generator changed, or a recompile interrupted after
+the files were written - the launcher rebuilds the code by itself
+(setup_start(NULL), which upstream never called), instead of showing the game
+as not set up.
+---
+ runtime/gamesetup.c       | 4 ++++
+ runtime/gamesetup.h       | 3 +++
+ runtime/ui/launcher_lg.mm | 6 ++++++
+ 3 files changed, 13 insertions(+)
+
+diff --git a/runtime/gamesetup.c b/runtime/gamesetup.c
+index 83bfdc4..db718e4 100644
+--- a/runtime/gamesetup.c
++++ b/runtime/gamesetup.c
+@@ -133,6 +133,10 @@ bool setup_ready(void) {
+     return game_ok(ROOT "/exefs") && is_file(ROOT "/romfs.bin") && gamelib_present(ROOT);
+ }
+ 
++bool setup_needs_code(void) {
++    return game_ok(ROOT "/exefs") && is_file(ROOT "/romfs.bin") && !gamelib_present(ROOT);
++}
++
+ typedef struct { char exefs[1024], romfs[1024], romfs_bin[1024]; bool package; } Found;
+ 
+ static void find_game(const char *dir, int depth, Found *f) {
+diff --git a/runtime/gamesetup.h b/runtime/gamesetup.h
+index ac0d866..cfa4f51 100644
+--- a/runtime/gamesetup.h
++++ b/runtime/gamesetup.h
+@@ -36,6 +36,9 @@ enum {
+ 
+ // The game files in <data root>/extracted: ready to play (exefs, romfs.bin and game code built for this version).
+ bool setup_ready(void);
++// The game files are set up there (exefs, romfs.bin) but the game code is missing or was built by another version of
++// the recomp (its id): only the code needs building again (setup_start(NULL)), not the game files.
++bool setup_needs_code(void);
+ // The game in that exefs/ folder: "Eevee", "Pikachu" or NULL.
+ const char *game_name(const char *exefs);
+ // The build of that exefs/main: one with address tables (runtime/fnhook.c, tools/patches.py) - the 60 fps and wild
+diff --git a/runtime/ui/launcher_lg.mm b/runtime/ui/launcher_lg.mm
+index d5aeea9..1524416 100644
+--- a/runtime/ui/launcher_lg.mm
++++ b/runtime/ui/launcher_lg.mm
+@@ -1078,6 +1078,12 @@ extern "C" void launcher_lg_run(const char *root) {
+     const char *keys_test = getenv("LARECOMP_LAUNCHER_KEYS");
+     if (keys_test && atoi(keys_test) > 0) bind_capture_begin(BIND_DEV_KEY, atoi(keys_test));
+     if (getenv("LARECOMP_SETUP_DIR")) g_setup_from_folder = true, setup_start(getenv("LARECOMP_SETUP_DIR"));
++    // (game files set up, but no game code built by this version - a new AppImage whose generator changed, or a
++    // recompile that was interrupted after the files were written: the code alone is built again, as at setup)
++    else if (setup_needs_code()) {
++        fprintf(stderr, "[launcher] the game code needs building again (game files set up already): rebuilding\n");
++        g_setup_from_folder = false, setup_start(NULL);
++    }
+     if (getenv("LARECOMP_MOD_INSTALL")) mod_install_start(getenv("LARECOMP_MOD_INSTALL"));
+     static const float bg[4] = {0.08f, 0.08f, 0.10f, 1};
+ #ifdef _WIN32
+-- 
+2.56.0
+

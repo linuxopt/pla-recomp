@@ -1,0 +1,163 @@
+From 8e569ee719ad67ca4d92b72e6f0e10703cf8756c Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 21:57:43 -0500
+Subject: [PATCH] Field of view setting for Legends: Arceus 1.1.1
+
+The camera update (f_700193b65c, once a frame) writes the frame's render camera
+(near, far, fov, aspect, -960) at [[x0 + 0x3d0] + 0x78] + 0x1ec; the renderer
+builds its projection from a copy. A hook runs the update, then widens that fov
+in tangent space (the game's own zooms keep their proportions), capped at 150
+degrees, only where the memory has the render camera's layout. Found on a
+running game: a hardware watch on the fov, then the pointers from x0. Setting:
+fov (degrees, 0 = the game's 50), a Field of view slider on the Graphics tab.
+---
+ runtime/hle/fps60.c       |  1 +
+ runtime/hle/pla_fov.c     | 50 +++++++++++++++++++++++++++++++++++++++
+ runtime/settings.c        |  2 ++
+ runtime/settings.h        |  1 +
+ runtime/ui/launcher_lg.mm |  7 ++++++
+ 5 files changed, 61 insertions(+)
+ create mode 100644 runtime/hle/pla_fov.c
+
+diff --git a/runtime/hle/fps60.c b/runtime/hle/fps60.c
+index 5604060..824c69f 100644
+--- a/runtime/hle/fps60.c
++++ b/runtime/hle/fps60.c
+@@ -674,6 +674,7 @@ void pla60_configure(const char *exefs) {
+             hooked = true;
+             g_pla_mouse_look = !getenv("LARECOMP_PLA_MOUSE_LOOK") || atoi(getenv("LARECOMP_PLA_MOUSE_LOOK")) != 0;
+             rt_register_fnhook_at(0x700193d16cull, pla_mouse_look_hook);
++            { extern int pla_fov_hook(Cpu *, uint64_t); rt_register_fnhook_at(0x700193b65cull, pla_fov_hook); }  // (hle/pla_fov.c)
+             rt_register_fnhook_at(PLA_SCRIPT_STEP, pla_script_step_hook);
+             if (!getenv("LARECOMP_PLA_WAIT_TICK") || atoi(getenv("LARECOMP_PLA_WAIT_TICK"))) rt_register_fnhook_at(PLA_SCRIPT_FRAMES, pla_script_frames_hook);
+             if (!getenv("LARECOMP_PLA_SEQ_TICK") || atoi(getenv("LARECOMP_PLA_SEQ_TICK"))) rt_register_fnhook_at(PLA_SEQ_STEP, pla_seq_step_hook);
+diff --git a/runtime/hle/pla_fov.c b/runtime/hle/pla_fov.c
+new file mode 100644
+index 0000000..0b5f6c0
+--- /dev/null
++++ b/runtime/hle/pla_fov.c
+@@ -0,0 +1,50 @@
++// Field of view for Legends: Arceus 1.1.1 (patches/0008; settings: fov, the launcher's Graphics tab). The game draws
++// the field at 50 degrees. Its camera update (f_700193b65c, once a frame) writes the frame's render camera - near, far,
++// fov (radians), aspect, then -960 - which the renderer copies and builds the projection from; the render camera is at
++// [[x0 + 0x3d0] + 0x78] + 0x1ec from the camera object it's called with (found on a running 1.1.1: a hardware watch on
++// the fov, then the pointers from x0). The hook runs the game's update, then widens that fov.
++//
++// The widening is in tangent space, so the game's own zooms (aiming, close-ups) keep their proportions:
++// tan(new / 2) = tan(fov / 2) * tan(setting / 2) / tan(50 / 2). Capped at 150 degrees. Anything that doesn't look like
++// the render camera (another scene's objects, a pointer that isn't there) is left alone.
++#include <math.h>
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "../cpu.h"
++#include "../settings.h"
++
++void rt_call_original(Cpu *c, uint64_t addr);
++
++#define GAME_DEG 50.0
++#define MAX_RAD (150.0 * M_PI / 180.0)
++
++float pla_fov_scaled(float game_fov, int target_deg) {
++    if (target_deg <= 0 || target_deg == (int)GAME_DEG || !(game_fov > 0.01f && game_fov < 3.1f)) return game_fov;
++    double k = tan(target_deg * M_PI / 360.0) / tan(GAME_DEG * M_PI / 360.0);
++    double n = 2.0 * atan(tan(game_fov / 2.0) * k);
++    return (float)(n > MAX_RAD ? MAX_RAD : n);
++}
++
++// near, far, fov, aspect around fov: the render camera's layout
++bool pla_fov_record_ok(const float *f) {
++    float near = f[-2], far = f[-1], fov = f[0], aspect = f[1];
++    return near > 0 && near <= 10 && far > near && far < 1e7f && fov > 0.01f && fov < 3.1f && aspect > 0.5f && aspect < 8;
++}
++
++static bool guest_ptr(uint64_t p, uint64_t align) { return p >= 0x7000000000ull && p < 0x7FFFFFF000ull && !(p & (align - 1)); }
++
++int pla_fov_hook(Cpu *c, uint64_t addr) {
++    int target = g_settings.fov;
++    if (target <= 0 || target == (int)GAME_DEG) return 0;  // (the game's own: its function runs as usual)
++    uint64_t cam = c->x[0];  // (x0 is the update's result once it has run)
++    rt_call_original(c, addr);
++    if (!guest_ptr(cam, 8)) return 1;
++    uint64_t obj = *(const uint64_t *)(uintptr_t)(cam + 0x3d0);
++    if (!guest_ptr(obj, 8)) return 1;
++    uint64_t rc = *(const uint64_t *)(uintptr_t)(obj + 0x78);
++    if (!guest_ptr(rc, 8)) return 1;
++    float *fov = (float *)(uintptr_t)(rc + 0x1ec);
++    if (pla_fov_record_ok(fov)) *fov = pla_fov_scaled(*fov, target);
++    return 1;
++}
+diff --git a/runtime/settings.c b/runtime/settings.c
+index ee28dd8..0c1ffee 100644
+--- a/runtime/settings.c
++++ b/runtime/settings.c
+@@ -62,6 +62,7 @@ static void parse_line(const char *line) {
+     else if (!strcmp(key, "fps")) { int f = atoi(val); g_settings.fps = f == 60 || f == 72 || f == 120 || f == 144 || f == FPS_UNLIMITED ? f : 30; }
+     else if (!strcmp(key, "experimental")) g_settings.experimental = atoi(val) != 0, g_experimental_seen = true;
+     else if (!strcmp(key, "frame_timing")) g_settings.fixed_steps = !strcmp(val, "fixed");
++    else if (!strcmp(key, "fov")) { int v = atoi(val); g_settings.fov = v >= 30 && v <= 110 ? v : 0; }  // (0: the game's)
+     else if (!strcmp(key, "render_height")) g_settings.res_height = atoi(val) >= 360 && atoi(val) <= 4320 ? atoi(val) : 0;
+     else if (!strcmp(key, "volume")) g_settings.volume = (float)atof(val);
+     else if (!strcmp(key, "mouse_sens")) g_settings.mouse_sens = (float)atof(val);
+@@ -146,6 +147,7 @@ void settings_save(void) {
+     fprintf(f, "fps = %d\n", g_settings.next_fps ? g_settings.next_fps : g_settings.fps);
+     fprintf(f, "frame_timing = %s\n", g_settings.fixed_steps ? "fixed" : "real_time");
+     fprintf(f, "render_height = %d\n", g_settings.next_res_height ? g_settings.next_res_height - 1 : g_settings.res_height);
++    fprintf(f, "fov = %d\n", g_settings.fov);
+     fprintf(f, "smaa = %d\n", g_settings.antialias == AA_SMAA);
+     fprintf(f, "mod = %s\n", g_settings.mod);
+     fprintf(f, "plugins_off = %s\n", g_settings.plugins_off);
+diff --git a/runtime/settings.h b/runtime/settings.h
+index 5740d68..3925a63 100644
+--- a/runtime/settings.h
++++ b/runtime/settings.h
+@@ -53,6 +53,7 @@ typedef struct {
+     char plugins_on[256];   // ... and the opt-in ones switched on ("steamrelay.dll"; plugin_opt_in)
+     char setup_base[1024], setup_update[1024], setup_keys[1024];  // the start screen's picked game files (base game,
+                                                                   // update, prod.keys: runtime/gamesetup.h setup_start_files)
++    int fov;             // field of view in degrees (Legends: Arceus 1.1.1, hle/pla_fov.c); 0 = the game's own (50)
+     int next_fps, next_res_height;  // set in game (hle/pla_options.c; the height + 1), 0 = not: for the ini, from the next start
+ } Settings;
+ 
+diff --git a/runtime/ui/launcher_lg.mm b/runtime/ui/launcher_lg.mm
+index 9c0e11d..15c87f4 100644
+--- a/runtime/ui/launcher_lg.mm
++++ b/runtime/ui/launcher_lg.mm
+@@ -1101,6 +1101,7 @@ extern "C" void launcher_lg_run(const char *root) {
+     static const int scale_modes[] = {RES_MATCH, RES_Q75, RES_Q50, RES_Q25, RES_DYNAMIC};
+     auto scale_index = [&](int mode) { for (int i = 0; i < 5; i++) if (scale_modes[i] == mode) return i; return 0; };
+     int ups_i = g_settings.upscaler == UPSCALE_BILINEAR, scale_i = scale_index(g_settings.res_mode);
++    int fov_i = g_settings.fov >= 30 && g_settings.fov <= 110 ? g_settings.fov : 50;  // (patches/0008: 50 = the game's own)
+     auto apply_rec = [&]() { res = rec.res, fps_i = rec.fps, shl_i = rec.nowait; };
+     if (g_settings_fresh) apply_rec();
+     int bg_i = g_settings.background >= 0 && g_settings.background <= 2 ? g_settings.background : 0;
+@@ -1121,6 +1122,7 @@ extern "C" void launcher_lg_run(const char *root) {
+         wildb = d.wild_battle, prompts_i = d.button_prompts, smooth_sh = d.shadow_smooth, shcol_i = d.shadow_color, bg_i = d.background, pk_i = d.pkhex_link;
+         detail_i = d.detail, shadows_i = d.shadows, sharp_i = d.sharpen;
+         ups_i = d.upscaler == UPSCALE_BILINEAR, scale_i = scale_index(d.res_mode);
++        fov_i = d.fov ? d.fov : 50;
+         shl_i = d.shader_nowait;
+         gopt = k_gopt_default;
+     };
+@@ -1261,6 +1263,10 @@ extern "C" void launcher_lg_run(const char *root) {
+         ImGui::TextDisabled("%s", T("(when rendering below the window's size)", "(quando renderiza abaixo do tamanho da janela)"));
+         const char *const sharp_names[] = {T("Off", "Desligado"), T("Low", "Baixo"), T("Medium", "Médio"), T("High", "Alto")};
+         ImGui::Combo(T("Sharpening", "Nitidez"), &sharp_i, sharp_names, 4);
++        ImGui::SliderInt(T("Field of view", "Campo de visão"), &fov_i, 40, 100, fov_i == 50 ? T("50° (the game's)", "50° (o do jogo)") : "%d°");
++        if (ImGui::IsItemHovered())
++            ImGui::SetTooltip("%s", T("How wide the camera sees in the field (the game: 50°). Aiming and close-ups keep their zoom.",
++                                      "O quanto a câmera vê no campo (o jogo: 50°). Mirar e os closes mantêm o zoom."));
+         const char *const shadow_names[] = {"Switch (1024)", T("High (2048)", "Alta (2048)"), T("Ultra (4096)", "Ultra (4096)")};
+         ImGui::Combo(T("Shadows", "Sombras"), &shadows_i, shadow_names, 3);
+         ImGui::Checkbox(T("Smooth shadow edges", "Suavizar as bordas das sombras"), &smooth_sh);
+@@ -1782,6 +1788,7 @@ extern "C" void launcher_lg_run(const char *root) {
+     g_settings.sharpen = sharp_i;
+     g_settings.upscaler = ups_i ? UPSCALE_BILINEAR : UPSCALE_FSR1;
+     g_settings.res_mode = scale_modes[scale_i];
++    g_settings.fov = fov_i == 50 ? 0 : fov_i;
+     g_settings.background = bg_i;
+     g_settings.pkhex_link = pk_i;
+     g_settings.shader_nowait = shl_i;
+-- 
+2.56.0
+

@@ -15,3 +15,7 @@ clang -std=gnu11 -O1 -g -Wall -Wno-unused-function -I"$S" -I"$S/nvn" -Iwork/src/
 clang -std=gnu11 -O1 -g -Wall -Wno-unused-function -I"$S" -Iwork/src/third_party \
     tests/cheats_test.c "$S/cheats.c" work/src/third_party/miniz/miniz.c -o "$B/cheats" -lpthread -lm
 "$B/cheats"
+# the field of view (patches/0008): the hook against fake camera objects at guest addresses, the setting
+clang -std=gnu11 -O1 -g -Wall -Wno-unused-function -I"$S" -I"$S/nvn" -Iwork/src/third_party -I/usr/local/include \
+    tests/fov_test.c "$S/hle/pla_fov.c" "$S/settings.c" tests/unit_stubs.c -o "$B/fov" $(pkg-config --libs sdl3) -lm
+"$B/fov"

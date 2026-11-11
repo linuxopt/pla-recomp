@@ -3,8 +3,8 @@
 # AppImage's own tools reachable (PATH holds a few shell utilities for AppRun - no compiler, no Python).
 #   setup      fresh data root; setup from the extracted dump (LARECOMP_SETUP_DIR); waits for [setup] ready; asserts
 #              the bundled generator + zig were used, the game library was built, AppRun seeded plugins / mods (off)
-#   interrupt  fresh data root; setup killed 60 s into the recompile; started again (no crash, not "ready"), then
-#              set up again to [setup] ready
+#   interrupt  fresh data root; setup killed 60 s into the recompile; started again without the dump: it rebuilds the
+#              game code by itself (patches/0004) to [setup] ready
 #   stale      the setup phase's data root with the game library's id changed: the start rebuilds it
 # dump: an extracted Arceus 1.1.1 (main, main.npdm, ... next to bin/). Default: the folder this repo sits in.
 # It is only read: the test links its files into a clean exefs/ + romfs/ view (the folder may hold other things).
@@ -61,11 +61,16 @@ wait_for() {
     done
     return 1
 }
-stop() {  # (AppRun execs lasrecomp from the AppImage's mount; its children: the generator, zig)
-    kill "$APP" 2>/dev/null || true
-    pkill -f '/tmp/[.]mount_PLA-Re.*/lasrecomp' 2>/dev/null || true
+# stop: only this run's processes - the AppImage's runtime, AppRun -> lasrecomp and its children (the generator, zig).
+# (Never by name: another copy of the game may be running on this PC.)
+tree() { local c; for c in $(pgrep -P "$1"); do tree "$c"; done; echo "$1"; }
+stop() {
+    local pids
+    pids=$(tree "$APP" 2>/dev/null || true)
+    [ -n "$pids" ] && kill $pids 2>/dev/null || true
     sleep 3
-    pkill -f '/tmp/[.]mount_PLA-Re' 2>/dev/null || true
+    pids=$(tree "$APP" 2>/dev/null || true)
+    [ -n "$pids" ] && kill -9 $pids 2>/dev/null || true
     wait "$APP" 2>/dev/null || true
     sync_log
 }
@@ -78,7 +83,7 @@ assert_ready() {
 
 case "$phase" in
 setup)
-    root="$W/data root"; log=$W/setup.log
+    root="$W/data setup"; log=$W/setup.log
     rm -rf "$root"
     t0=$(date +%s)
     run "$root" "$log" LARECOMP_SETUP_DIR="$(view)"
@@ -94,8 +99,12 @@ setup)
              lua-examples/pla_research.lua; do
         [ -e "$root/$f" ] || die "AppRun didn't seed $f"
     done
-    grep -qE '^mod = *$' "$root/larecomp.ini" && grep -qE '^plugins_on = *$' "$root/larecomp.ini" ||
-        die "mods / plugins not all off in larecomp.ini: $(grep -E '^(mod|plugins_on) =' "$root/larecomp.ini")"
+    # (no larecomp.ini: the launcher writes it only when a setting changes - the defaults then, mods and plugins off)
+    if [ -f "$root/larecomp.ini" ]; then
+        grep -qE '^mod = *$' "$root/larecomp.ini" && grep -qE '^plugins_on = *$' "$root/larecomp.ini" ||
+            die "mods / plugins not all off in larecomp.ini: $(grep -E '^(mod|plugins_on) =' "$root/larecomp.ini")"
+    fi
+    grep -q "is switched off" "$log" || die "the plugins weren't reported off"
     say "ok: ready in ${took}s; $(grep '\[gamebuild\] generator' "$log" | sed 's/.*\[gamebuild\] //')"
     ;;
 interrupt)
@@ -105,22 +114,18 @@ interrupt)
     wait_for "$log" '\[gamebuild\] generator' 600 || { stop; die "the recompile didn't start"; }
     sleep 60; stop
     say "killed 60 s into the recompile"
-    log=$W/interrupt2.log
-    run "$root" "$log"
-    sleep 15
-    kill -0 "$APP" 2>/dev/null || die "the second start exited: $(tail -5 "$log")"
     [ -s "$root/extracted/lasgame.so" ] && die "a game library exists after the interrupted build"
-    stop
-    say "second start: running, not ready (no game library)"
-    log=$W/interrupt3.log
-    run "$root" "$log" LARECOMP_SETUP_DIR="$(view)"
-    wait_for "$log" '\[setup\] (ready|failed)' 3600 || { stop; die "setup again didn't finish"; }
+    log=$W/interrupt2.log
+    run "$root" "$log"   # (no LARECOMP_SETUP_DIR: the game files are set up, only the code is missing - patch 0004)
+    wait_for "$log" '\[launcher\] the game code needs building again' 60 || { stop; die "the second start didn't rebuild: $(tail -5 "$log")"; }
+    say "second start: rebuilding the game code by itself"
+    wait_for "$log" '\[setup\] (ready|failed)|\[gamebuild\] failed' 3600 || { stop; die "the rebuild didn't finish"; }
     stop
     assert_ready "$root" "$log"
     say "ok: interrupted setup recovers"
     ;;
 stale)
-    root="$W/data root"; log=$W/stale.log
+    root="$W/data setup"; log=$W/stale.log
     [ -s "$root/extracted/lasgame.so.id" ] || die "run the setup phase first"
     echo 0000000000000000 > "$root/extracted/lasgame.so.id"
     run "$root" "$log"

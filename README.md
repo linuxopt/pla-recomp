@@ -1,67 +1,165 @@
-# PL:A Recomp AppImage
+# PL:A Recomp — Pokémon Legends: Arceus for Linux, as an AppImage
 
-Builds a self-contained Linux AppImage of [LZ&A Recomp](https://gitlab.com/mr.wifi1143/LZA-Recomp)'s Pokémon Legends:
-Arceus port (branch `LegendsA`, v1.2.0-rc1, commit `bc830dd`): the static recompilation's runtime, the tools that
-recompile the game code on the player's PC (a portable Python with the generator, and zig), every plugin and mod
-upstream ships, and a launcher where the player picks their **base game**, their **1.1.1 update** and their
-**prod.keys**, then presses **Recompile**.
+A native Linux PC port of **Pokémon Legends: Arceus** (update 1.1.1), packaged as a single AppImage. It's built from
+[LZ&A Recomp](https://gitlab.com/mr.wifi1143/LZA-Recomp) by MrWifi, a **static recompilation**: the game's own code is
+translated and compiled for your PC, from **your own** game files, on your PC. Not an emulator.
 
-**No game files, game code or keys are in this repository or the AppImage**, and none ever will be. The player brings
-their own dump. The build checks the AppImage for anything from the game and fails if it finds something.
+> **No game files, game code or keys are in this repository or the AppImage**, and none ever will be. You need your own
+> dump of the game from your own Switch. Pokémon Legends: Arceus is © Nintendo / Creatures Inc. / GAME FREAK inc. /
+> The Pokémon Company. This project is not affiliated with or endorsed by them.
 
-Pokémon Z-A is a separate project, in its own folder.
+What this AppImage adds on top of upstream: everything bundled (no compiler, Python or libraries to install), a
+launcher where you pick your **base game**, **update** and **prod.keys** and press **Recompile**, a **Cheats** tab
+(with code cheats working in a recompiled game), a **Field of view** slider, **Render scale / Upscaler** options, and
+fixes (see [The patches](#the-patches)).
 
-## Using the AppImage
+---
 
-```sh
+## Download
+
+Get **`PLA-Recomp-1.2.0-rc1-x86_64.AppImage`** from the
+[latest release](https://github.com/linuxopt/pla-recomp/releases/latest) (156 MB). The release page also has its
+SHA-256 checksum.
+
+## What you need
+
+**A PC:**
+
+- 64-bit x86 CPU with **AVX2** (Intel 2013 / Haswell or newer, AMD Zen or newer)
+- A GPU with a **Vulkan 1.3** driver (AMD / Intel: Mesa; NVIDIA: the proprietary driver)
+- A Linux desktop (X11 or Wayland) from about 2025 or newer: **Debian 13, Ubuntu 25.04, Fedora 42, Arch / CachyOS /
+  Manjaro** or anything newer (built against glibc 2.41)
+- About **25 GB free** while the game is set up (about 8 GB afterwards)
+
+**From your own Switch:**
+
+| File | What it is | How to get it |
+|---|---|---|
+| Base game | `.nsp` or `.xci` of Pokémon Legends: Arceus | dumped from your Switch (e.g. with nxdumptool) |
+| Update **1.1.1** | `.nsp` of the 1.1.1 update | dumped the same way — **only 1.1.1 works** |
+| `prod.keys` | your console's keys | dumped with Lockpick_RCM |
+
+Compressed dumps (`.nsz` / `.xcz`) aren't read: decompress them first (`nsz -D file.nsz`). If you already use an
+emulator, the launcher finds `prod.keys` by itself in `~/.switch` or the usual Eden / Yuzu / Ryujinx key folders.
+
+## Install
+
+```bash
 chmod +x PLA-Recomp-1.2.0-rc1-x86_64.AppImage
-./PLA-Recomp-1.2.0-rc1-x86_64.AppImage        # no FUSE: add --appimage-extract-and-run
 ```
 
-1. **Game Files**: pick the base game (`.nsp` / `.xci`), the 1.1.1 update (`.nsp`) and `prod.keys` (dumped from your
-   own Switch with Lockpick_RCM; found by itself if it's in `~/.switch` or an emulator's key folder). Anything other
-   than Legends: Arceus 1.1.1 is refused before your earlier setup is touched. An already-extracted dump (`exefs/` +
-   `romfs/`) works too: **Use an extracted dump instead...**.
-2. **Recompile**: the game code is generated and compiled for your PC once (about 8 minutes on a 24-thread Ryzen;
-   longer on smaller CPUs; ~25 GB free during setup).
-3. **Play.** After an AppImage update whose generator changed, the launcher rebuilds the game code by itself
-   (the game files stay).
+```bash
+./PLA-Recomp-1.2.0-rc1-x86_64.AppImage
+```
 
-Data (game files set up, saves, settings, mods, plugins, logs): `~/.local/share/plarecomp` (or
-`$XDG_DATA_HOME/plarecomp`, or `$LARECOMP_DATA_ROOT`). The log is `lasrecomp.log` there.
+That's all — it can live anywhere (a folder with spaces is fine). If your system has no FUSE (the AppImage says
+"FUSE" / "fusermount" when it won't start), either install it (`sudo apt install libfuse2`, `sudo dnf install fuse`,
+`sudo pacman -S fuse2`) or run it with `--appimage-extract-and-run`. To get a menu entry, use a tool such as Gear Lever
+or AppImageLauncher, or make a `.desktop` file pointing at the AppImage.
 
-Requirements: x86-64 with AVX2, a Vulkan 1.3 GPU driver, an X11 or Wayland desktop. Runs on Debian 13, Ubuntu 25.04,
-Fedora 42, Arch and newer (built against glibc 2.41).
+## First start: set up the game
 
-### What's in it
+1. Click **Set up game** (or **Game Files**).
+2. **Browse...** next to each row and pick your **base game**, your **1.1.1 update** and your **prod.keys**.
+   (prod.keys is often filled in already.)
+3. Click **Recompile**. The game's code is read out of your dumps, translated and compiled for your PC. This happens
+   **once**: about 6–8 minutes on a fast 16–24-thread CPU, longer on smaller ones. **Leave the window open** until it
+   finishes — closing it stops the build (it starts again next time).
+4. Click **Play**. The first start also prepares the shaders once (a progress bar); short stutters the first time a
+   new effect appears are normal.
 
-Built into the runtime: 30 / 60 / 120 / 144 fps at the game's real speed, draw distance, shadows, round bloom, RCAS
-sharpening, SMAA, render scale up to 4K, keyboard and mouse with remapping, Xbox / PlayStation / keyboard button
-prompts, PKHeX saves and PKHeX Link (LiveHeX, port 6000), `.pa8` import / export, Link Trades on this PC and the LAN,
-texture packs, several mods in a load order.
+Already have extracted files (`exefs/` with `main`, `main.npdm`… and `romfs/` with `bin/`, the 1.1.1 update applied)?
+Use **Use an extracted dump instead...** on the same page.
 
-Shipped **off**, turned on in the launcher's Mods page:
+If something is wrong, the message appears under the row it's about — e.g. "That update isn't 1.1.1" under Update,
+or "Your keys can't open those game files" under prod.keys. Your earlier setup is never touched by a failed one.
+
+## Playing
+
+- **Controllers**: Xbox, PlayStation, Switch Pro and others, with button prompts to match (Options > Game).
+- **Keyboard and mouse**: WASD, mouse camera (click to take the mouse, Esc to let it go), mouse in the menus.
+  Remap everything in **Controls**.
+- **Settings** are in the launcher (**Options**) and in the game (Menu > Help > Settings).
+- **Saves** are ordinary Switch save files, so PKHeX opens them; **PKHeX Link** (Settings) lets PKHeX's LiveHeX
+  connect to the running game.
+- Hold **Shift** while starting to see the launcher again if you ticked "Skip the launcher".
+
+### Options worth knowing
+
+| Where | Option | |
+|---|---|---|
+| Options > Display | Resolution, Fullscreen, SMAA, Frame rate | 30 or 60 fps; tick **Experimental settings** for 72 / 120 / 144 / Unlimited |
+| Options > Graphics | **Render scale** | with Resolution on Automatic: 100 / 75 / 50 / 25 % of the window, or Dynamic (lowered to keep the frame rate) |
+| Options > Graphics | **Upscaler** | AMD FSR 1 (sharp) or bilinear, when rendering below the window's size |
+| Options > Graphics | **Field of view** | 40–100° (the game: 50°); aiming and close-ups keep their zoom |
+| Options > Graphics | Sharpening, Shadows, Shadow color, Draw distance, Shader loading | |
+
+Frame rates above 60 are marked experimental by upstream; in testing on this build 144 fps played fine through story
+scenes, but if a scripted scene ever stalls, set 60 or 30 fps in the game's Settings and try the scene again.
+
+## Cheats
+
+**Mods > Cheats.** The AppImage ships the
+[GBAtemp Pokémon Legends: Arceus cheat database](https://gbatemp.net/threads/pokemon-legends-arceus-cheat-database.606215/)'s
+1.1.1 file — 41 cheats (infinite money, merits and health, max items and Poké Balls, shiny Pokémon, always level 100,
+100 % catch rate, infinite PP, six IVs at 31, easy research tasks…), credited in [`cheats/CREDITS.txt`](cheats/CREDITS.txt).
+
+- All cheats start **off**. Tick the ones you want; they apply from the game's next start.
+- Cheats that **rewrite the game's code** need the game code rebuilt with them **once** for each cheat file (about as
+  long as the first setup). The launcher does it by itself when the cheat file changes, or click
+  **Rebuild the game code with these cheats**. After that every cheat switches on and off freely.
+- **Import cheats...** takes another Atmosphère cheat file for 1.1.1 (`AEE8F150DDA1B5A8.txt`) or a cheat database's
+  `.zip` (the file for this version is taken out of it). Your own import is never replaced by the bundled file.
+- **Back up your save first** (`~/.local/share/plarecomp/save/`). Cheats change the game's memory directly.
+
+## Mods and plugins
+
+**Mods** in the launcher. Shipped, all **off** until you tick them:
 
 | | |
 |---|---|
-| **Lush Foliage** | 3x the grass, flowers and small plants, ~19,000 more trees (built from your own game files on first use). Needs a decent PC. |
-| **Legends Lua** | Lua 5.3 scripting for mod makers: scripts in `<data>/lua/`; an example in `<data>/lua-examples/`. Only run scripts you trust. |
+| **Lush Foliage** | 3× the grass, flowers and small plants, ~19,000 more trees (built from your own game files the first time). Needs a decent PC. |
+| **Legends Lua** | Lua scripting for mod makers: scripts in `~/.local/share/plarecomp/lua/`, an example in `lua-examples/`. Only run scripts you trust. |
 | **Steam relay** | Link Trades with Steam friends anywhere (Steam must be running). |
 
-Added by this AppImage (launcher, Options and Mods pages):
+**Add a mod...** adds a mod you downloaded (a `romfs/` replacement, a texture pack, or a plugin `.so`); several mods can
+be on at once, in a load order. **Open the mods folder** shows where they live, if you'd rather copy one in by hand.
 
-| | |
+## Where your files are
+
+Everything the game writes — the set-up game files, saves, settings, mods, plugins, cheats and logs — is in
+**`~/.local/share/plarecomp`** (or `$XDG_DATA_HOME/plarecomp`; `LARECOMP_DATA_ROOT=<folder>` picks another). The
+AppImage itself is never written to. To remove everything, delete that folder and the AppImage.
+
+## Updating
+
+Download the new AppImage and run it instead of the old one. Your setup, saves, settings and cheats stay. If the new
+version translates the game code differently, the launcher rebuilds the game code by itself on its first start (a few
+minutes, as at setup).
+
+## Troubleshooting
+
+The log is **`~/.local/share/plarecomp/lasrecomp.log`** (or the terminal, when you start the AppImage from one).
+
+| Problem | What to do |
 |---|---|
-| **Cheats** (Mods > Cheats) | Ships with the GBAtemp cheat database's 1.1.1 file (41 cheats: infinite money, merits and health, max items, shiny Pokémon, always level 100, 100 % catch rate, infinite PP, six IVs 31, easy research tasks...), credited in `cheats/CREDITS.txt`; *Import cheats...* takes another `AEE8F150DDA1B5A8.txt` or a cheat database's `.zip`. Tick each one on or off (all off at first); they run from the game's next start. Cheats that change values run live. Cheats that change the game's code are compiled into the game code as switchable variants (once per cheat file, about as long as the first setup: the launcher does it by itself, or *Rebuild the game code with these cheats*), then toggle like the others; one whose new instructions can't be translated stays greyed out. Back up your save first. |
-| **Field of view** (Options > Graphics) | 40-100 degrees (the game: 50). The field camera widens; aiming and close-ups keep their zoom. Legends: Arceus 1.1.1 only. |
-| **Render scale / Upscaler** (Options > Graphics) | With Resolution on Automatic: render at 100 / 75 / 50 / 25 % of the window, or Dynamic (lowered to hold the frame rate); AMD FSR 1 or bilinear brings it up to the window. |
+| "No keys found" / "Your keys can't open those game files" | Dump `prod.keys` again with Lockpick_RCM on your Switch's current system version, and pick it. |
+| "That update isn't 1.1.1" | Only update 1.1.1 is supported: dump the 1.1.1 update. |
+| "Those are compressed game files" | Decompress `.nsz` / `.xcz` first: `nsz -D <file>`. |
+| "The game code didn't build" | Check there are ~25 GB free; the log says what failed. |
+| The log says `stopped: PL:A Recomp was closed during the build` | The window was closed (or the app got a quit signal) while building — just start it again. |
+| It won't start, mentions FUSE | Install FUSE (see Install), or use `--appimage-extract-and-run`. |
+| "needs a CPU with AVX2" / a Vulkan error | The PC doesn't meet the requirements, or the GPU driver lacks Vulkan 1.3 — install your distribution's current GPU driver (`vulkaninfo` shows the version). |
+| A scripted scene stalls above 60 fps | Set 60 or 30 fps in the game's Settings and try the scene again. |
 
-## Building it
+---
 
-Needs podman (rootless). Everything else happens in a Debian 13 container, so the AppImage runs on older distros than
-the build machine.
+## Building it yourself
 
-```sh
+Needs **podman** (rootless). Everything else happens in a Debian 13 container, so the AppImage runs on distros older
+than the build machine.
+
+```bash
 ./build.sh            # image, fetch, runtime, assemble -> dist/PLA-Recomp-<version>-x86_64.AppImage
 ```
 
@@ -75,13 +173,15 @@ Steps on their own: `./build.sh image | fetch | runtime | assemble | shell`.
 - `scripts/build-runtime.sh`: a fresh upstream checkout, `patches/*.patch` applied with `git am`, then
   `make all legendslua steamrelay`.
 - `scripts/assemble.sh`: the AppDir (the runtime finds its tools next to its executable), bundled libraries, the
-  "nothing from the game" and glibc checks, appimagetool.
+  bundled cheats, the "nothing from the game" and glibc checks, appimagetool.
 
 Podman on a kernel without the `overlay` / `tun` modules (some CachyOS kernels): install `fuse-overlayfs` and set
 `mount_program = "/usr/bin/fuse-overlayfs"` under `[storage.options.overlay]` in `~/.config/containers/storage.conf`;
 the build uses host networking.
 
 ### The patches
+
+Applied in order on top of upstream `LegendsA` at `bc830dd` (v1.2.0-rc1):
 
 | | |
 |---|---|
@@ -90,11 +190,13 @@ the build uses host networking.
 | `0003-launcher-three-pickers` | the Game Files page: base game / update / prod.keys rows, Recompile, errors under their row |
 | `0004-rebuild-stale-game-code` | the game code is rebuilt by itself when the game files are set up but the code is missing or outdated |
 | `0005-launcher-minimize-crash` | the launcher no longer crashes when minimized on the home page (upstream divides by a zero-width banner) |
-| `0006-cheats` | Atmosphère cheat files (a `<build id>.txt` or a cheat database's `.zip`) in a Cheats tab on the Mods page; the ones ticked run every frame in Atmosphère's cheat VM. Cheats that rewrite the game's code can't work in a recompilation and are greyed out |
+| `0006-cheats` | Atmosphère cheat files in a Cheats tab on the Mods page; the ones ticked run every frame in a dmnt-compatible cheat VM |
 | `0007-launcher-upscaling-options` | Render scale and Upscaler on the Graphics tab (both already in the renderer and `larecomp.ini`) |
 | `0008-field-of-view` | the Field of view setting: a hook on the camera update (`f_700193b65c`) widens the frame's render camera (`[[x0+0x3d0]+0x78]+0x1ec`) in tangent space |
 | `0009-helper-exit-logging` | the log says how a helper process ended (exit code or signal); `LARECOMP_PROC_LOG=1` traces every helper started, waited for and ended |
 | `0010-code-cheats` | cheats that rewrite instructions: every fixed instruction write in the cheat file is compiled in next to the original (`gen.py --code-variants`, the randomizer's `RANDO_CODE` path; `rando_word` picks the word on), and the cheat VM's writes into main's code switch those variants; `lasgame.so.variants` says which list the game code has, and a different one rebuilds it |
+| `0011-gamebuild-closed-during-build` | closing the launcher mid-build is logged as that, not as a generator failure |
+| `0012-code-cheats-registers-caves` | code cheats written through a not-yet-set offset register, and code caves (new code past main's code, e.g. a master code's hook function, compiled as a function of its own) |
 
 Moving to a newer upstream: change `PIN_UPSTREAM_COMMIT` in `pins.env` and rebuild. A patch that no longer applies
 stops the build with its name: refresh it in `work/src` (edit, `git commit`, `git format-patch -1`).
@@ -103,21 +205,21 @@ stops the build with its name: refresh it in `work/src` (edit, `git commit`, `gi
 
 | | |
 |---|---|
-| `tests/run_unit.sh` | C unit tests of the patched reader, setup and settings, the cheats (parser, VM, import, on / off) and the field of view (`./build.sh shell tests/run_unit.sh`) |
+| `tests/run_unit.sh` | C unit tests of the patched reader, setup and settings, the cheats (parser, VM, import, on / off, code variants, caves) and the field of view (`./build.sh shell tests/run_unit.sh`) |
 | `tests/zig_shared.sh` | zig links a game-library-shaped `.so` against the runtime (`ZIG_DIR=` for the AppDir's trimmed zig) |
 | `tests/contents.sh` | the AppImage holds everything, nothing from the game, nothing needing glibc > 2.41 |
-| `tests/smoke.sh setup\|stale\|interrupt\|rebuild [dump]` | the AppImage end to end from an extracted dump, bundled tools only (no compiler or Python on PATH) |
+| `tests/smoke.sh setup\|stale\|interrupt\|rebuild\|quit [dump]` | the AppImage end to end from an extracted dump, bundled tools only (no compiler or Python on PATH), no window (SDL offscreen) |
 | `tests/compat.sh` | the AppImage on a stock Debian 13 with a desktop's libraries: everything resolves, the launcher starts |
 | `tests/gui_pages.sh` | screenshots of the launcher's Game Files, Mods, Cheats, Options and Graphics pages on a virtual display (in a container) |
 | `tests/gui_minimize.sh` | the launcher survives being minimized (needs an X11 desktop and xdotool) |
 
 Never commit `cache/`, `work/` or `dist/` (gitignored): `work/` holds the recompiled game code of test runs.
 
-`cheats/` holds the bundled cheat file and its credits (`CREDITS.txt`: the GBAtemp thread and its contributors). The thread
-gives no license for the codes: ask its maintainer before distributing them widely.
+`cheats/` holds the bundled cheat file and its credits (`CREDITS.txt`: the GBAtemp thread and its contributors). The
+thread gives no license for the codes: ask its maintainer before distributing them widely.
 
 ## Credits and licenses
 
-LZ&A Recomp by MrWifi, built on letsgo-recomp (raulzrrs) and LAS Recomp (Peiikai), MIT licensed. Every bundled
-component's license is in the AppImage's `licenses/`. Pokémon Legends: Arceus is © Nintendo / Creatures Inc. /
-GAME FREAK inc. / The Pokémon Company. This project is not affiliated with or endorsed by them.
+[LZ&A Recomp](https://gitlab.com/mr.wifi1143/LZA-Recomp) by MrWifi, built on letsgo-recomp (raulzrrs) and LAS Recomp
+(Peiikai), MIT licensed. Cheats: the GBAtemp thread's maintainer OblivionReign and its contributors (see
+`cheats/CREDITS.txt`). Every bundled component's license is in the AppImage's `licenses/` folder.

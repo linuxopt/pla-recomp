@@ -8,5 +8,6 @@ S=work/src/runtime
 B=$(mktemp -d "${TMPDIR:-/tmp}/unit.XXXXXX")
 trap 'rm -rf "$B"' EXIT
 clang -std=gnu11 -O1 -g -Wall -Wno-unused-function -I"$S" -I"$S/nvn" -Iwork/src/third_party -I/usr/local/include \
-    tests/nxpkg_files_test.c "$S/nxpkg.c" -o "$B/unit" -lm
+    tests/unit_test.c "$S/nxpkg.c" "$S/gamesetup.c" "$S/settings.c" tests/unit_stubs.c -o "$B/unit" \
+    $(pkg-config --libs sdl3) -lpthread -lm
 "$B/unit"

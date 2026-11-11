@@ -1,4 +1,4 @@
-// Unit tests for the patched runtime (patches/): built with upstream's own sources by tests/run_unit.sh.
+// Unit tests for the patched runtime (patches/: nxpkg, gamesetup, settings): built with upstream's own sources by tests/run_unit.sh.
 // Fixtures live in a temp folder whose name has a space and an e-acute, as players' folders do.
 #include <limits.h>
 #include <stdio.h>
@@ -7,7 +7,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "gamesetup.h"
 #include "nxpkg.h"
+#include "settings.h"
 
 static int g_run, g_fail;
 #define CHECK(cond)                                                              \
@@ -128,10 +130,71 @@ static int default_switch(void) {
     return ok;
 }
 
+// ---- patch 0002: the 1.1.1 check, the saved picker paths
+static void write_exefs(const uint8_t build_id[8], uint64_t program) {
+    char dir[PATH_MAX], p[PATH_MAX];
+    path(dir, "exefs");
+    mkdir(dir, 0755);
+    uint8_t main_nso[0x60] = {'N', 'S', 'O', '0'};
+    memcpy(main_nso + 0x40, build_id, 8);
+    path(p, "exefs/main");
+    write_file(p, main_nso, sizeof main_nso);
+    uint8_t npdm[0x98] = {'M', 'E', 'T', 'A'};
+    uint32_t aci_off = 0x80;
+    memcpy(npdm + 0x70, &aci_off, 4);
+    memcpy(npdm + 0x80, "ACI0", 4);
+    memcpy(npdm + 0x90, &program, 8);
+    path(p, "exefs/main.npdm");
+    write_file(p, npdm, sizeof npdm);
+}
+static const uint8_t PLA_111[8] = {0xae, 0xe8, 0xf1, 0x50, 0xdd, 0xa1, 0xb5, 0xa8};
+
+static int pla111_yes(void) {
+    int ok = 1;
+    char dir[PATH_MAX];
+    write_exefs(PLA_111, 0x01001F5010DFA000ull);
+    path(dir, "exefs");
+    CHECK(game_is_pla_111(dir));
+    return ok;
+}
+
+static int pla111_other_build(void) {
+    int ok = 1;
+    char dir[PATH_MAX];
+    uint8_t other[8];
+    memcpy(other, PLA_111, 8);
+    other[0] ^= 1;
+    write_exefs(other, 0x01001F5010DFA000ull);
+    path(dir, "exefs");
+    CHECK(!game_is_pla_111(dir));
+    write_exefs(PLA_111, 0x0100187003A36000ull);  // (the build id, but another game's program id)
+    CHECK(!game_is_pla_111(dir));
+    return ok;
+}
+
+static int settings_roundtrip(void) {
+    int ok = 1;
+    char ini[PATH_MAX];
+    path(ini, "larecomp.ini");
+    setenv("LARECOMP_SETTINGS", ini, 1);
+    settings_defaults(&g_settings);
+    snprintf(g_settings.setup_base, sizeof g_settings.setup_base, "%s", "/home/me/My Games/Pokémon Legends Arceus [v0].nsp");
+    snprintf(g_settings.setup_update, sizeof g_settings.setup_update, "%s", "/home/me/My Games/PLA update v1.1.1.nsp");
+    snprintf(g_settings.setup_keys, sizeof g_settings.setup_keys, "%s", "/home/me/.switch/prod.keys");
+    settings_save();
+    memset(&g_settings, 0, sizeof g_settings);
+    settings_load();
+    CHECK(strcmp(g_settings.setup_base, "/home/me/My Games/Pokémon Legends Arceus [v0].nsp") == 0);
+    CHECK(strcmp(g_settings.setup_update, "/home/me/My Games/PLA update v1.1.1.nsp") == 0);
+    CHECK(strcmp(g_settings.setup_keys, "/home/me/.switch/prod.keys") == 0);
+    return ok;
+}
+
 int main(void) {
     struct { const char *name; int (*fn)(void); } tests[] = {
         {"no_keys", no_keys}, {"no_game", no_game}, {"files_spaces", files_spaces}, {"files_order", files_order},
         {"default_none", default_none}, {"default_switch", default_switch},
+        {"pla111_yes", pla111_yes}, {"pla111_other_build", pla111_other_build}, {"settings_roundtrip", settings_roundtrip},
     };
     for (size_t i = 0; i < sizeof tests / sizeof *tests; i++) {
         fresh_tmp();  // (each test in its own folder: none sees another's files)

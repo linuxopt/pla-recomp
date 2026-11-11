@@ -81,6 +81,8 @@ the build uses host networking.
 | `0002-gamesetup-files-and-version` | setup from the three files; the 1.1.1 check; the picked paths saved in `larecomp.ini` |
 | `0003-launcher-three-pickers` | the Game Files page: base game / update / prod.keys rows, Recompile, errors under their row |
 | `0004-rebuild-stale-game-code` | the game code is rebuilt by itself when the game files are set up but the code is missing or outdated |
+| `0005-launcher-minimize-crash` | the launcher no longer crashes when minimized on the home page (upstream divides by a zero-width banner) |
+| `0006-cheats` | Atmosphère cheat files (a `<build id>.txt` or a cheat database's `.zip`) in a Cheats tab on the Mods page; the ones ticked run every frame in Atmosphère's cheat VM. Cheats that rewrite the game's code can't work in a recompilation and are greyed out |
 
 Moving to a newer upstream: change `PIN_UPSTREAM_COMMIT` in `pins.env` and rebuild. A patch that no longer applies
 stops the build with its name: refresh it in `work/src` (edit, `git commit`, `git format-patch -1`).
@@ -89,7 +91,7 @@ stops the build with its name: refresh it in `work/src` (edit, `git commit`, `gi
 
 | | |
 |---|---|
-| `tests/run_unit.sh` | C unit tests of the patched reader, setup and settings (`./build.sh shell tests/run_unit.sh`) |
+| `tests/run_unit.sh` | C unit tests of the patched reader, setup and settings, and of the cheats (parser, VM, import, on / off) (`./build.sh shell tests/run_unit.sh`) |
 | `tests/zig_shared.sh` | zig links a game-library-shaped `.so` against the runtime (`ZIG_DIR=` for the AppDir's trimmed zig) |
 | `tests/contents.sh` | the AppImage holds everything, nothing from the game, nothing needing glibc > 2.41 |
 | `tests/smoke.sh setup\|stale\|interrupt [dump]` | the AppImage end to end from an extracted dump, bundled tools only (no compiler or Python on PATH) |

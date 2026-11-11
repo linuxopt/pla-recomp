@@ -1,0 +1,981 @@
+From 3b41ac2266b812246b112d0788ec17afb2a1d0f5 Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 02:14:50 +0000
+Subject: [PATCH] =?UTF-8?q?Cheats:=20Atmosph=C3=A8re=20cheat=20files,=20th?=
+ =?UTF-8?q?e=20dmnt=20cheat=20VM,=20a=20Cheats=20tab=20on=20the=20Mods=20p?=
+ =?UTF-8?q?age?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+runtime/cheats.c: the cheat file parser, Atmosphère's dmnt cheat VM (opcodes 0-A, C0-C4, FF0/FF1/FFF),
+the player's cheat files in <data>/cheats (import a <build id>.txt or a database zip; on / off by name).
+runtime/hle/cheats_rt.c: loaded at boot, the master code and the cheats that are on run as one program each
+frame (input_frame) with the buttons held; writes into code / read-only data refused, code-patching cheats
+skipped. Launcher: a Cheats tab on the Mods page (import, tick boxes, code patches greyed out).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014bAdkhrwPomwAxUjaHneaX
+---
+ runtime/cheats.c          | 564 ++++++++++++++++++++++++++++++++++++++
+ runtime/cheats.h          |  71 +++++
+ runtime/hle/cheats_rt.c   |  96 +++++++
+ runtime/hle/input.c       |   1 +
+ runtime/main.c            |   1 +
+ runtime/ui/launcher_lg.mm | 136 ++++++++-
+ 6 files changed, 865 insertions(+), 4 deletions(-)
+ create mode 100644 runtime/cheats.c
+ create mode 100644 runtime/cheats.h
+ create mode 100644 runtime/hle/cheats_rt.c
+
+diff --git a/runtime/cheats.c b/runtime/cheats.c
+new file mode 100644
+index 0000000..297b369
+--- /dev/null
++++ b/runtime/cheats.c
+@@ -0,0 +1,564 @@
++// Atmosphère-format cheats: the file parser, the dmnt cheat VM, the player's cheat files (cheats.h).
++// The VM follows Atmosphère's dmnt (stratosphere/dmnt.gen2 cheat VM): the same encodings, registers 64-bit, results of
++// arithmetic masked to the width, registers and save slots cleared at the start of every run, static registers kept.
++#include "cheats.h"
++
++#include <ctype.h>
++#include <errno.h>
++#include <limits.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <strings.h>
++#include <sys/stat.h>
++
++#include "miniz/miniz.h"
++
++#define STEP_LIMIT (1u << 22)  // instructions per run (an endless loop ends the run, never the game)
++
++// ---- the VM
++static uint64_t width_mask(unsigned w) { return w >= 8 ? ~0ull : (1ull << (w * 8)) - 1; }
++static bool width_ok(unsigned w) { return w == 1 || w == 2 || w == 4 || w == 8; }
++
++static uint64_t mem_read(const CheatEnv *e, uint64_t a, unsigned w, int *res) {
++    if (!e->readable || !e->readable(a, w)) { *res |= CHEAT_READ_BLOCKED; return 0; }
++    uint64_t v = 0;
++    memcpy(&v, (const void *)(uintptr_t)a, w);  // (little-endian, as the Switch)
++    return v;
++}
++static void mem_write(const CheatEnv *e, uint64_t a, unsigned w, uint64_t v, int *res) {
++    if (!e->writable || !e->writable(a, w)) { *res |= CHEAT_WRITE_BLOCKED; return; }
++    memcpy((void *)(uintptr_t)a, &v, w);
++}
++static uint64_t base_of(const CheatEnv *e, unsigned m) { return m < 4 ? e->base[m] : 0; }
++
++static bool cond(unsigned c, uint64_t a, uint64_t b, bool *bad) {
++    switch (c) {
++    case 1: return a > b;
++    case 2: return a >= b;
++    case 3: return a < b;
++    case 4: return a <= b;
++    case 5: return a == b;
++    case 6: return a != b;
++    default: *bad = true; return false;
++    }
++}
++
++// The length in words of the instruction at op[pc] (0: unknown opcode)
++static int op_len(const uint32_t *op, int n, int pc) {
++    uint32_t f = op[pc];
++    unsigned t = f >> 28, w = (f >> 24) & 0xF;
++    switch (t) {
++    case 0x0: case 0x1: return w == 8 ? 4 : 3;
++    case 0x2: return 1;
++    case 0x3: return ((f >> 24) & 0xF) == 0 ? 2 : 1;
++    case 0x4: return 3;
++    case 0x5: return 2;
++    case 0x6: return 3;
++    case 0x7: return 2;
++    case 0x8: return 1;
++    case 0x9: return ((f >> 8) & 0xF) ? (w == 8 ? 3 : 2) : 1;
++    case 0xA: { unsigned o = (f >> 8) & 0xF; return o == 2 || o == 4 || o == 5 ? 2 : 1; }
++    case 0xC: case 0xD: case 0xE: case 0xF: break;
++    default: return 0;
++    }
++    unsigned t2 = f >> 24;
++    switch (t2) {
++    case 0xC0: {
++        unsigned x = (f >> 8) & 0xF, cw = (f >> 20) & 0xF;
++        return x == 0 || x == 2 ? 2 : x == 4 ? (cw == 8 ? 3 : 2) : 1;
++    }
++    case 0xC1: case 0xC2: case 0xC3: return 1;
++    case 0xC4: return 3;
++    case 0xFF: {
++        unsigned t3 = f >> 20;
++        if (t3 == 0xFF0 || t3 == 0xFF1) return 1;
++        if (t3 == 0xFFF) { unsigned x = (f >> 8) & 0xF; return x == 0 || x == 2 ? 2 : 1; }
++        return 0;
++    }
++    default: (void)n; return 0;
++    }
++}
++static bool is_cond_begin(uint32_t f) {
++    unsigned t = f >> 28, t2 = f >> 24;
++    return t == 0x1 || t == 0x8 || t2 == 0xC0 || t2 == 0xC4;
++}
++
++// Skip from pc (just after a false condition, or an else) to just after the matching end - or, when want_else, just
++// after a matching else. Returns the new pc, or -1 if an opcode can't be decoded.
++static int skip_block(const uint32_t *op, int n, int pc, bool want_else) {
++    int depth = 0;
++    while (pc < n) {
++        int len = op_len(op, n, pc);
++        if (len == 0 || pc + len > n) return -1;
++        uint32_t f = op[pc];
++        if (is_cond_begin(f)) depth++;
++        else if (f >> 28 == 0x2) {
++            bool is_else = ((f >> 24) & 0xF) == 1;
++            if (depth == 0) {
++                if (!is_else || want_else) return pc + 1;
++            } else if (!is_else) depth--;
++        }
++        pc += len;
++    }
++    return pc;  // (no end: the rest of the cheat was the block)
++}
++
++// the next value of width w: one word, or two for 8 bytes (the high one first)
++static uint64_t imm(const uint32_t *op, int pc, unsigned w) {
++    return w == 8 ? (uint64_t)op[pc] << 32 | op[pc + 1] : op[pc];
++}
++
++static uint64_t arith(unsigned c, uint64_t a, uint64_t b, bool *bad) {
++    switch (c) {
++    case 0: return a + b;
++    case 1: return a - b;
++    case 2: return a * b;
++    case 3: return b >= 64 ? 0 : a << b;
++    case 4: return b >= 64 ? 0 : a >> b;
++    case 5: return a & b;
++    case 6: return a | b;
++    case 7: return ~a;
++    case 8: return a ^ b;
++    case 9: return a;
++    default: *bad = true; return 0;
++    }
++}
++
++int cheat_vm_run(const uint32_t *op, int n, const CheatEnv *e, CheatState *st) {
++    memset(st->reg, 0, sizeof st->reg);
++    memset(st->saved, 0, sizeof st->saved);
++    memset(st->loop_top, 0, sizeof st->loop_top);
++    uint64_t *r = st->reg;
++    int res = CHEAT_OK, pc = 0;
++    unsigned steps = 0;
++#define BAD() do { return res | CHEAT_BAD_OPCODE; } while (0)
++    while (pc < n) {
++        if (++steps > STEP_LIMIT) return res | CHEAT_TOO_LONG;
++        int len = op_len(op, n, pc);
++        if (len == 0 || pc + len > n) BAD();
++        uint32_t f = op[pc];
++        unsigned t = f >> 28, w = (f >> 24) & 0xF;
++        int next = pc + len;
++        bool bad = false;
++        switch (t) {
++        case 0x0: {  // 0TMR00AA AAAAAAAA VVVVVVVV (VVVVVVVV): [M + A + rR] = V
++            if (!width_ok(w)) BAD();
++            unsigned m = (f >> 20) & 0xF, ri = (f >> 16) & 0xF;
++            uint64_t a = base_of(e, m) + ((uint64_t)(f & 0xFF) << 32 | op[pc + 1]) + r[ri];
++            mem_write(e, a, w, imm(op, pc + 2, w), &res);
++            break;
++        }
++        case 0x1: {  // 1TMCXrAA AAAAAAAA VVVVVVVV (VVVVVVVV): if [M + A (+ rr)] C V
++            if (!width_ok(w)) BAD();
++            unsigned m = (f >> 20) & 0xF, c = (f >> 16) & 0xF, x = (f >> 12) & 0xF, ri = (f >> 8) & 0xF;
++            uint64_t a = base_of(e, m) + ((uint64_t)(f & 0xFF) << 32 | op[pc + 1]) + (x ? r[ri] : 0);
++            uint64_t v = mem_read(e, a, w, &res);
++            if (!cond(c, v, imm(op, pc + 2, w) & width_mask(w), &bad)) {
++                if (bad) BAD();
++                if ((next = skip_block(op, n, next, true)) < 0) BAD();
++            }
++            break;
++        }
++        case 0x2:  // 20000000 end, 21000000 else (reached from a true block: skip to its end)
++            if (w == 1 && (next = skip_block(op, n, next, false)) < 0) BAD();
++            else if (w > 1) BAD();
++            break;
++        case 0x3: {  // 300R0000 VVVVVVVV start a loop of V turns / 310R0000 its end
++            unsigned ri = (f >> 16) & 0xF;
++            if (w == 0) r[ri] = op[pc + 1], st->loop_top[ri] = (uint64_t)next;
++            else if (w == 1) { if (--r[ri] != 0) next = (int)st->loop_top[ri]; }
++            else BAD();
++            break;
++        }
++        case 0x4:  // 400R0000 VVVVVVVV VVVVVVVV: rR = V
++            r[(f >> 16) & 0xF] = (uint64_t)op[pc + 1] << 32 | op[pc + 2];
++            break;
++        case 0x5: {  // 5TMRI0AA AAAAAAAA: rR = [M + A] (I = 1: [rR + A]; I = 2: [M + rR + A])
++            if (!width_ok(w)) BAD();
++            unsigned m = (f >> 20) & 0xF, ri = (f >> 16) & 0xF, mode = (f >> 12) & 0xF;
++            uint64_t A = (uint64_t)(f & 0xFF) << 32 | op[pc + 1], a;
++            if (mode == 0) a = base_of(e, m) + A;
++            else if (mode == 1) a = r[ri] + A;
++            else if (mode == 2) a = base_of(e, m) + r[ri] + A;
++            else BAD();
++            r[ri] = mem_read(e, a, w, &res);
++            break;
++        }
++        case 0x6: {  // 6T0RIor0 VVVVVVVV VVVVVVVV: [rR (+ rr)] = V, then rR += T if I
++            if (!width_ok(w)) BAD();
++            unsigned ri = (f >> 16) & 0xF, inc = (f >> 12) & 0xF, o = (f >> 8) & 0xF, oi = (f >> 4) & 0xF;
++            uint64_t v = (uint64_t)op[pc + 1] << 32 | op[pc + 2];
++            mem_write(e, r[ri] + (o ? r[oi] : 0), w, v, &res);
++            if (inc) r[ri] += w;
++            break;
++        }
++        case 0x7: {  // 7T0RC000 VVVVVVVV: rR = rR (+ - * << >>) V
++            if (!width_ok(w)) BAD();
++            unsigned ri = (f >> 16) & 0xF, c = (f >> 12) & 0xF;
++            if (c > 4) BAD();
++            r[ri] = arith(c, r[ri], op[pc + 1], &bad) & width_mask(w);
++            break;
++        }
++        case 0x8: {  // 8kkkkkkk: the block runs while all those buttons are held
++            uint64_t k = f & 0x0FFFFFFF;
++            if ((e->keys & k) != k && (next = skip_block(op, n, next, true)) < 0) BAD();
++            break;
++        }
++        case 0x9: {  // 9TCRS0s0 / 9TCRS100 VVVVVVVV (VVVVVVVV): rR = rS op (rs or V)
++            if (!width_ok(w)) BAD();
++            unsigned c = (f >> 20) & 0xF, d = (f >> 16) & 0xF, s1 = (f >> 12) & 0xF, hi = (f >> 8) & 0xF;
++            uint64_t b = hi ? imm(op, pc + 1, w) : r[(f >> 4) & 0xF];
++            uint64_t v = arith(c, r[s1], b, &bad);
++            if (bad) BAD();
++            r[d] = v & width_mask(w);
++            break;
++        }
++        case 0xA: {  // ATSRIOxa (aaaaaaaa): [where, by O] = rS, then rR += T if I
++            if (!width_ok(w)) BAD();
++            unsigned s = (f >> 20) & 0xF, ri = (f >> 16) & 0xF, inc = (f >> 12) & 0xF, o = (f >> 8) & 0xF,
++                     x = (f >> 4) & 0xF;
++            uint64_t rel = (o == 2 || o == 4 || o == 5) ? ((uint64_t)(f & 0xF) << 32 | op[pc + 1]) : 0, a;
++            switch (o) {
++            case 0: a = r[ri]; break;                         // [rR]
++            case 1: a = r[ri] + r[x]; break;                  // [rR + rx]
++            case 2: a = r[ri] + rel; break;                   // [rR + a]
++            case 3: a = base_of(e, x) + r[ri]; break;         // [M + rR]
++            case 4: a = base_of(e, x) + rel; break;           // [M + a]
++            case 5: a = base_of(e, x) + r[ri] + rel; break;   // [M + rR + a]
++            default: BAD();
++            }
++            mem_write(e, a, w, r[s] & width_mask(w), &res);
++            if (inc) r[ri] += w;
++            break;
++        }
++        default: {
++            unsigned t2 = f >> 24;
++            if (t2 == 0xC0) {  // C0TcSX##: if rS c (memory / a register / a value)
++                unsigned cw = (f >> 20) & 0xF, c = (f >> 16) & 0xF, s = (f >> 12) & 0xF, x = (f >> 8) & 0xF,
++                         p = (f >> 4) & 0xF, q = f & 0xF;
++                if (!width_ok(cw)) BAD();
++                uint64_t rel = (uint64_t)q << 32 | (len > 1 ? op[pc + 1] : 0), b;
++                switch (x) {
++                case 0: b = mem_read(e, base_of(e, p) + rel, cw, &res); break;     // C0TcS0Ma aaaaaaaa
++                case 1: b = mem_read(e, base_of(e, p) + r[q], cw, &res); break;    // C0TcS1Mr
++                case 2: b = mem_read(e, r[p] + rel, cw, &res); break;              // C0TcS2Ra aaaaaaaa
++                case 3: b = mem_read(e, r[p] + r[q], cw, &res); break;             // C0TcS3Rr
++                case 4: b = imm(op, pc + 1, cw); break;                            // C0TcS400 VVVVVVVV (VVVVVVVV)
++                case 5: b = r[p]; break;                                           // C0TcS5X0
++                default: BAD();
++                }
++                uint64_t mk = width_mask(cw);
++                if (!cond(c, r[s] & mk, b & mk, &bad)) {
++                    if (bad) BAD();
++                    if ((next = skip_block(op, n, next, true)) < 0) BAD();
++                }
++            } else if (t2 == 0xC1) {  // C10D0Sx0: x 0 rD = saved[S], 1 saved[D] = rS, 2 saved[D] = 0, 3 rD = 0
++                unsigned d = (f >> 16) & 0xF, s = (f >> 8) & 0xF, x = (f >> 4) & 0xF;
++                if (x == 0) r[d] = st->saved[s];
++                else if (x == 1) st->saved[d] = r[s];
++                else if (x == 2) st->saved[d] = 0;
++                else if (x == 3) r[d] = 0;
++                else BAD();
++            } else if (t2 == 0xC2) {  // C2x0XXXX: the same for every register in the mask
++                unsigned x = (f >> 20) & 0xF, mask = f & 0xFFFF;
++                if (x > 3) BAD();
++                for (int i = 0; i < 16; i++)
++                    if (mask >> i & 1) {
++                        if (x == 0) r[i] = st->saved[i];
++                        else if (x == 1) st->saved[i] = r[i];
++                        else if (x == 2) st->saved[i] = 0;
++                        else r[i] = 0;
++                    }
++            } else if (t2 == 0xC3) {  // C3000XXx: static XX < 0x80: rx = static; else static = rx
++                unsigned si = (f >> 4) & 0xFF, ri = f & 0xF;
++                if (si < 0x80) r[ri] = st->statics[si];
++                else st->statics[si] = r[ri];
++            } else if (t2 == 0xC4) {  // C4r00000 kkkkkkkk kkkkkkkk: the 64-bit keypress conditional
++                uint64_t k = (uint64_t)op[pc + 1] << 32 | op[pc + 2];
++                if ((e->keys & k) != k && (next = skip_block(op, n, next, true)) < 0) BAD();
++            } else if (t2 == 0xFF) {
++                // FF0 pause / FF1 resume the game, FFF debug log: nothing to do here (the game isn't a process
++                // a cheat can stop, and there is no cheat log)
++            } else BAD();
++            break;
++        }
++        }
++        if (bad) BAD();
++        pc = next;
++    }
++#undef BAD
++    return res;
++}
++
++// ---- the file
++static void trim(char *s) {
++    size_t n = strlen(s);
++    while (n && isspace((unsigned char)s[n - 1])) s[--n] = 0;
++    size_t i = 0;
++    while (s[i] && isspace((unsigned char)s[i])) i++;
++    if (i) memmove(s, s + i, n - i + 1);
++}
++
++bool cheats_parse(const char *text, CheatList *out) {
++    out->c = NULL, out->n = 0;
++    int cap = 0;
++    Cheat *cur = NULL;
++    const char *p = text;
++    if ((unsigned char)p[0] == 0xEF && (unsigned char)p[1] == 0xBB && (unsigned char)p[2] == 0xBF) p += 3;  // (BOM)
++    while (*p) {
++        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
++        if (!*p) break;
++        if (*p == '[' || *p == '{') {
++            char close = *p == '[' ? ']' : '}';
++            const char *end = strchr(p + 1, close), *eol = strpbrk(p, "\r\n");
++            if (!end || (eol && end > eol)) goto fail;
++            if (out->n == cap) {
++                cap = cap ? cap * 2 : 16;
++                Cheat *nc = realloc(out->c, (size_t)cap * sizeof *nc);
++                if (!nc) goto fail;
++                out->c = nc;
++            }
++            cur = &out->c[out->n++];
++            memset(cur, 0, sizeof *cur);
++            size_t len = (size_t)(end - p - 1);
++            if (len >= CHEAT_NAME_MAX) len = CHEAT_NAME_MAX - 1;
++            memcpy(cur->name, p + 1, len);
++            trim(cur->name);
++            cur->master = close == '}';
++            p = eol ? eol : end + strlen(end);  // (the rest of the line: an author, a note)
++            continue;
++        }
++        // a code word: 8 hex digits
++        int k = 0;
++        uint32_t v = 0;
++        while (k < 8 && isxdigit((unsigned char)p[k])) {
++            char ch = p[k];
++            v = v << 4 | (uint32_t)(ch <= '9' ? ch - '0' : (ch | 0x20) - 'a' + 10);
++            k++;
++        }
++        if (k != 8 || isxdigit((unsigned char)p[8]) || !cur || cur->nop >= CHEAT_MAX_OPS) goto fail;
++        cur->op[cur->nop++] = v;
++        p += 8;
++    }
++    if (out->n > 0) return true;
++fail:
++    cheats_free(out);
++    return false;
++}
++
++void cheats_free(CheatList *l) {
++    free(l->c);
++    l->c = NULL, l->n = 0;
++}
++
++bool cheat_patches_code(const Cheat *c, uint64_t code_lo, uint64_t code_hi) {
++    for (int pc = 0; pc < c->nop;) {
++        int len = op_len(c->op, c->nop, pc);
++        if (len == 0) return false;
++        uint32_t f = c->op[pc];
++        if (f >> 28 == 0 && ((f >> 20) & 0xF) == CHEAT_MAIN && pc + 1 < c->nop) {
++            uint64_t a = (uint64_t)(f & 0xFF) << 32 | c->op[pc + 1];
++            if (a >= code_lo && a < code_hi) return true;
++        }
++        pc += len;
++    }
++    return false;
++}
++
++// ---- the player's cheat files
++static char *slurp(const char *path, size_t *n) {
++    FILE *f = fopen(path, "rb");
++    if (!f) return NULL;
++    char *b = NULL;
++    size_t cap = 0, len = 0;
++    for (;;) {
++        if (len + 4096 + 1 > cap) {
++            cap = cap ? cap * 2 : 65536;
++            char *nb = realloc(b, cap);
++            if (!nb) { free(b), fclose(f); return NULL; }
++            b = nb;
++        }
++        size_t got = fread(b + len, 1, cap - len - 1, f);
++        len += got;
++        if (got == 0) break;
++    }
++    fclose(f);
++    b[len] = 0;
++    if (n) *n = len;
++    return b;
++}
++static bool write_atomic(const char *path, const void *d, size_t n) {
++    char tmp[PATH_MAX];
++    snprintf(tmp, sizeof tmp, "%s.tmp", path);
++    FILE *f = fopen(tmp, "wb");
++    if (!f) return false;
++    bool ok = fwrite(d, 1, n, f) == n;
++    ok = fclose(f) == 0 && ok;
++    if (ok) ok = rename(tmp, path) == 0;
++    if (!ok) remove(tmp);
++    return ok;
++}
++
++bool cheats_build_id(const char *exefs, char out[17]) {
++    char p[PATH_MAX];
++    snprintf(p, sizeof p, "%s/main", exefs);
++    FILE *f = fopen(p, "rb");
++    if (!f) return false;
++    uint8_t h[0x48];
++    bool ok = fread(h, 1, sizeof h, f) == sizeof h && !memcmp(h, "NSO0", 4);
++    fclose(f);
++    if (!ok) return false;
++    for (int i = 0; i < 8; i++) snprintf(out + i * 2, 3, "%02X", h[0x40 + i]);
++    return true;
++}
++
++// <data>/cheats (exefs is <data>/extracted/exefs) and a file in it named after the build
++static bool cheat_path(const char *exefs, const char *ext, char *out, size_t size, bool make) {
++    char bid[17];
++    if (!cheats_build_id(exefs, bid)) return false;
++    char dir[PATH_MAX];
++    snprintf(dir, sizeof dir, "%s", exefs);
++    for (int up = 0; up < 2; up++) {  // (up from exefs/ and extracted/)
++        char *s = strrchr(dir, '/');
++        if (s && s != dir) *s = 0;
++        else { snprintf(dir, sizeof dir, "%s", up == 0 && s ? "/" : "."); break; }
++    }
++    size_t dl = strlen(dir);
++    if (dl + 8 >= sizeof dir) return false;
++    memcpy(dir + dl, "/cheats", 8);
++    if (make && mkdir(dir, 0755) != 0 && errno != EEXIST) return false;
++    return snprintf(out, size, "%s/%s%s", dir, bid, ext) < (int)size;
++}
++
++static bool is_build_id_name(const char *base, size_t len) {  // "0123456789ABCDEF" (any case)
++    if (len != 16) return false;
++    for (size_t i = 0; i < 16; i++)
++        if (!isxdigit((unsigned char)base[i])) return false;
++    return true;
++}
++
++bool cheats_import(const char *path, const char *exefs, char *why, size_t why_size) {
++    char bid[17], dst[PATH_MAX];
++    if (why_size) why[0] = 0;
++    if (!cheats_build_id(exefs, bid)) {
++        snprintf(why, why_size, "The game files aren't set up yet (no exefs/main).");
++        return false;
++    }
++    const char *base = strrchr(path, '/');
++    base = base ? base + 1 : path;
++    size_t bl = strlen(base);
++    char *text = NULL;
++    if (bl > 4 && !strcasecmp(base + bl - 4, ".zip")) {
++        mz_zip_archive z;
++        memset(&z, 0, sizeof z);
++        if (!mz_zip_reader_init_file(&z, path, 0)) {
++            snprintf(why, why_size, "Couldn't open %s as a zip.", base);
++            return false;
++        }
++        mz_uint nf = mz_zip_reader_get_num_files(&z);
++        for (mz_uint i = 0; i < nf && !text; i++) {
++            char name[512];
++            mz_zip_reader_get_filename(&z, i, name, sizeof name);
++            const char *nb = strrchr(name, '/');
++            nb = nb ? nb + 1 : name;
++            if (strlen(nb) == 20 && !strncasecmp(nb, bid, 16) && !strcasecmp(nb + 16, ".txt")) {
++                size_t n;
++                char *d = mz_zip_reader_extract_to_heap(&z, i, &n, 0);
++                if (d && (text = malloc(n + 1))) memcpy(text, d, n), text[n] = 0;
++                mz_free(d);
++            }
++        }
++        mz_zip_reader_end(&z);
++        if (!text) {
++            snprintf(why, why_size, "%s has no cheats for this version of the game (no %s.txt in it).", base, bid);
++            return false;
++        }
++    } else {
++        size_t stem = bl > 4 && !strcasecmp(base + bl - 4, ".txt") ? bl - 4 : bl;
++        if (is_build_id_name(base, stem) && strncasecmp(base, bid, 16)) {
++            snprintf(why, why_size, "%s is for another version of the game: yours (1.1.1) needs %s.txt.", base, bid);
++            return false;
++        }
++        if (!(text = slurp(path, NULL))) {
++            snprintf(why, why_size, "Couldn't read %s.", base);
++            return false;
++        }
++    }
++    CheatList l;
++    if (!cheats_parse(text, &l)) {
++        snprintf(why, why_size, "%s isn't an Atmosphère cheat file ([name] lines and 8-digit codes).", base);
++        free(text);
++        return false;
++    }
++    cheats_free(&l);
++    bool ok = cheat_path(exefs, ".txt", dst, sizeof dst, true) && write_atomic(dst, text, strlen(text));
++    if (!ok) snprintf(why, why_size, "Couldn't save the cheats in the data folder.");
++    free(text);
++    return ok;
++}
++
++int cheats_load(const char *exefs, CheatList *out) {
++    out->c = NULL, out->n = 0;
++    char p[PATH_MAX];
++    if (!cheat_path(exefs, ".txt", p, sizeof p, false)) return -1;
++    char *text = slurp(p, NULL);
++    if (!text) return -1;
++    bool ok = cheats_parse(text, out);
++    free(text);
++    return ok ? out->n : -1;
++}
++
++// <build id>.on: one name per line, the cheats that are on
++static char *on_list(const char *exefs, char *p, size_t ps) {
++    if (!cheat_path(exefs, ".on", p, ps, false)) return NULL;
++    return slurp(p, NULL);
++}
++bool cheats_is_on(const char *exefs, const char *name) {
++    char p[PATH_MAX];
++    char *t = on_list(exefs, p, sizeof p);
++    if (!t) return false;
++    bool on = false;
++    for (char *line = strtok(t, "\n"); line && !on; line = strtok(NULL, "\n")) {
++        size_t n = strlen(line);
++        if (n && line[n - 1] == '\r') line[n - 1] = 0;
++        on = !strcmp(line, name);
++    }
++    free(t);
++    return on;
++}
++void cheats_set_on(const char *exefs, const char *name, bool on) {
++    char p[PATH_MAX];
++    if (!cheat_path(exefs, ".on", p, sizeof p, true)) return;
++    char *t = slurp(p, NULL);
++    size_t cap = (t ? strlen(t) : 0) + strlen(name) + 2, len = 0;
++    char *o = malloc(cap + 1);
++    if (!o) { free(t); return; }
++    bool had = false;
++    if (t)
++        for (char *line = strtok(t, "\n"); line; line = strtok(NULL, "\n")) {
++            size_t n = strlen(line);
++            if (n && line[n - 1] == '\r') line[--n] = 0;
++            if (!n) continue;
++            if (!strcmp(line, name)) { had = true; if (!on) continue; }
++            memcpy(o + len, line, n), len += n, o[len++] = '\n';
++        }
++    if (on && !had) {
++        size_t n = strlen(name);
++        memcpy(o + len, name, n), len += n, o[len++] = '\n';
++    }
++    write_atomic(p, o, len);
++    free(o), free(t);
++}
++void cheats_all_off(const char *exefs) {
++    char p[PATH_MAX];
++    if (cheat_path(exefs, ".on", p, sizeof p, false)) remove(p);
++}
++bool cheats_any_on(const char *exefs) {
++    char p[PATH_MAX];
++    char *t = on_list(exefs, p, sizeof p);
++    bool any = false;
++    for (char *s = t; s && *s && !any; s++) any = !isspace((unsigned char)*s);
++    free(t);
++    return any;
++}
+diff --git a/runtime/cheats.h b/runtime/cheats.h
+new file mode 100644
+index 0000000..5cfa7fa
+--- /dev/null
++++ b/runtime/cheats.h
+@@ -0,0 +1,71 @@
++// Atmosphère-format cheats (patches/0006): the cheat file (<build id>.txt: [name] / {master} headers, 8-digit hex
++// words), the dmnt cheat VM run against the game's memory, and the player's cheat files in the data folder
++// (<data>/cheats/<build id>.txt and <build id>.on, the names of the cheats that are on).
++//
++// Guest addresses are host addresses here (rt.h), so the VM reads and writes memory directly, after asking the
++// readable / writable callbacks. This is a static recompilation: the game's code never runs from memory, so a cheat
++// that patches main's code does nothing - cheat_patches_code() lets the launcher say so, and the writable callback
++// refuses those writes.
++#pragma once
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#define CHEAT_MAX_OPS 0x100  // (Atmosphère's limit per cheat)
++#define CHEAT_NAME_MAX 64
++
++typedef struct {
++    char name[CHEAT_NAME_MAX];
++    bool master;  // {Master Code}: runs before the others, whenever any cheat is on
++    int nop;      // words in op[]
++    uint32_t op[CHEAT_MAX_OPS];
++} Cheat;
++
++typedef struct {
++    Cheat *c;
++    int n;
++} CheatList;
++
++// Memory regions (the M field): 0 main, 1 heap, 2 alias, 3 aslr
++enum { CHEAT_MAIN, CHEAT_HEAP, CHEAT_ALIAS, CHEAT_ASLR };
++
++typedef struct {
++    uint64_t base[4], size[4];
++    uint64_t keys;  // the buttons held, in HID bit order (A = 1 << 0, B = 1 << 1, ... ZL = 1 << 8, ...)
++    bool (*readable)(uint64_t addr, uint64_t n);
++    bool (*writable)(uint64_t addr, uint64_t n);
++} CheatEnv;
++
++typedef struct {
++    uint64_t reg[16];       // r0..r15 (cleared at the start of each run, as in Atmosphère)
++    uint64_t saved[16];     // C1 / C2 save slots (cleared each run)
++    uint64_t statics[256];  // C3 static registers: 0x00-0x7F read-only (set by the host), 0x80-0xFF written by cheats
++    uint64_t loop_top[16];  // (where each register's loop starts: a word index)
++} CheatState;
++
++// cheat_vm_run's result: CHEAT_OK, or these bits
++enum {
++    CHEAT_OK = 0,
++    CHEAT_WRITE_BLOCKED = 1 << 0,  // a write to memory that is not writable (main's code, an unmapped address): skipped
++    CHEAT_BAD_OPCODE = 1 << 1,     // an unknown or cut-off opcode: the run ended there
++    CHEAT_TOO_LONG = 1 << 2,       // too many steps (an endless loop): the run ended there
++    CHEAT_READ_BLOCKED = 1 << 3,   // a read of memory that is not readable: read as 0
++};
++
++int cheat_vm_run(const uint32_t *op, int n, const CheatEnv *env, CheatState *st);
++
++bool cheats_parse(const char *text, CheatList *out);  // false: not a cheat file (out: empty)
++void cheats_free(CheatList *l);
++// a fixed write into main's code (offsets code_lo..code_hi from main's base): it can't work in a recompilation
++bool cheat_patches_code(const Cheat *c, uint64_t code_lo, uint64_t code_hi);
++
++// The player's cheat files. exefs: the set-up game's exefs folder (<data>/extracted/exefs); the cheats live next to
++// extracted/, in <data>/cheats.
++bool cheats_build_id(const char *exefs, char out[17]);  // main's build id, the first 8 bytes in upper-case hex
++// a .txt (any name, unless it is another build's id) or a .zip (the file named after this build, anywhere in it)
++bool cheats_import(const char *path, const char *exefs, char *why, size_t why_size);
++int cheats_load(const char *exefs, CheatList *out);  // the imported cheats (their number; -1: none imported)
++bool cheats_is_on(const char *exefs, const char *name);
++void cheats_set_on(const char *exefs, const char *name, bool on);
++void cheats_all_off(const char *exefs);
++bool cheats_any_on(const char *exefs);
+diff --git a/runtime/hle/cheats_rt.c b/runtime/hle/cheats_rt.c
+new file mode 100644
+index 0000000..e497451
+--- /dev/null
++++ b/runtime/hle/cheats_rt.c
+@@ -0,0 +1,96 @@
++// The player's cheats in the game (patches/0006): at boot, the cheats imported for this build (<data>/cheats, set in
++// the launcher's Cheats page) are loaded; every frame (hle/input.c input_frame, on the game thread at its present) the
++// master code and each cheat that is on run in the cheat VM (runtime/cheats.c) against guest memory, with the buttons
++// held. LARECOMP_CHEATS=0: none run.
++//
++// Regions: main = main's base, heap = the heap window, alias = the alias region, aslr = the guest window. Writes into
++// any module's code or read-only data are refused (this is a recompilation: code there never runs, and those pages
++// may be read-only), as are the host-function and outside-the-window addresses. Cheats that patch main's code are
++// skipped at load, with a line in the log.
++#include <stdlib.h>
++#include <string.h>
++
++#include "../cheats.h"
++#include "../hle.h"
++#include "../kernel.h"
++#include "../rt.h"
++
++uint64_t input_buttons_now(void);  // (hle/input.c)
++
++static uint32_t *g_prog;  // the master code, then each cheat that is on, as one program (Atmosphère's dmnt runs
++static int g_nprog, g_on_count;  // them so: registers set by the master code reach the cheats after it in a frame)
++static CheatState g_st;
++static int g_reported;  // (failures logged once each)
++
++static bool in_window(uint64_t a, uint64_t n) {
++    return n && a >= GUEST_LO && a < GUEST_HI && n <= GUEST_HI - a && !(a < HLE_BASE + HLE_SIZE && a + n > HLE_BASE);
++}
++static bool overlaps(uint64_t a, uint64_t n, uint64_t lo, uint64_t size) { return a < lo + size && a + n > lo; }
++static bool rt_readable(uint64_t a, uint64_t n) { return in_window(a, n); }
++static bool rt_writable(uint64_t a, uint64_t n) {
++    if (!in_window(a, n)) return false;
++    for (int i = 0; i < g_nmodules; i++) {
++        const Module *m = &g_modules[i];
++        if (overlaps(a, n, m->base + m->text_off, m->text_size) || overlaps(a, n, m->base + m->ro_off, m->ro_size))
++            return false;
++    }
++    pagewatch_prewrite(a, n);  // (the VM writes right after: host copies of watched pages see it)
++    return true;
++}
++
++void cheats_rt_load(const char *exefs) {
++    free(g_prog);
++    g_prog = NULL, g_nprog = g_on_count = g_reported = 0;
++    memset(&g_st, 0, sizeof g_st);
++    const char *e = getenv("LARECOMP_CHEATS");
++    if (e && !strcmp(e, "0")) return;
++    CheatList l;
++    if (cheats_load(exefs, &l) <= 0) return;
++    uint64_t text = g_nmodules ? g_modules[0].text_off : 0, text_n = g_nmodules ? g_modules[0].text_size : 0;
++    bool *take = calloc((size_t)l.n, sizeof *take);
++    int master = -1, total = 0;
++    for (int i = 0; take && i < l.n; i++) {
++        Cheat *c = &l.c[i];
++        if (!c->nop) continue;
++        if (c->master) { if (master < 0) master = i, take[i] = true, total += c->nop; continue; }
++        if (!cheats_is_on(exefs, c->name)) continue;
++        if (cheat_patches_code(c, text, text + text_n)) {
++            LOG("[cheats] \"%s\" patches the game's code: it can't work in a recompilation, skipped\n", c->name);
++            continue;
++        }
++        take[i] = true, total += c->nop, g_on_count++;
++    }
++    if (g_on_count && (g_prog = malloc((size_t)total * sizeof *g_prog))) {
++        for (int pass = 0; pass < 2; pass++)  // (the master code first)
++            for (int i = 0; i < l.n; i++)
++                if (take[i] && (pass == 0) == (i == master))
++                    memcpy(g_prog + g_nprog, l.c[i].op, (size_t)l.c[i].nop * 4), g_nprog += l.c[i].nop;
++        LOG("[cheats] %d of %d on%s\n", g_on_count, l.n, master >= 0 ? " (and the master code)" : "");
++    } else g_on_count = 0;
++    free(take);
++    cheats_free(&l);
++}
++
++void cheats_frame(void) {
++    if (!g_on_count) return;
++    CheatEnv env = {
++        .base = {g_nmodules ? g_modules[0].base : MAIN_BASE, HEAP_BASE, ALIAS_BASE, GUEST_LO},
++        .size = {g_nmodules ? g_modules[0].size : 0, HEAP_MAX, ALIAS_SIZE, GUEST_HI - GUEST_LO},
++        .keys = input_buttons_now(),
++        .readable = rt_readable,
++        .writable = rt_writable,
++    };
++    int r = cheat_vm_run(g_prog, g_nprog, &env, &g_st);
++    int bad = r & (CHEAT_BAD_OPCODE | CHEAT_TOO_LONG | CHEAT_WRITE_BLOCKED) & ~g_reported;
++    if (bad) {
++        g_reported |= bad;
++        LOG("[cheats]%s%s%s\n", bad & CHEAT_BAD_OPCODE ? " an opcode this VM doesn't know (the frame's run stopped there)" : "",
++            bad & CHEAT_TOO_LONG ? " a run took too long (stopped)" : "",
++            bad & CHEAT_WRITE_BLOCKED ? " a write outside the game's writable memory (skipped)" : "");
++    }
++}
++
++RT_ON_RESET(cheats_rt_reset) {  // (boot() loads them again)
++    free(g_prog);
++    g_prog = NULL, g_nprog = g_on_count = 0;
++}
+diff --git a/runtime/hle/input.c b/runtime/hle/input.c
+index 44f77c8..0d7eca7 100644
+--- a/runtime/hle/input.c
++++ b/runtime/hle/input.c
+@@ -720,6 +720,7 @@ static uint64_t g_pad_obj;
+ volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A / B skip the opening movie too)
+ RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
+ void input_frame(uint64_t frame) {
++    { extern void cheats_frame(void); cheats_frame(); }  // (the cheats that are on: hle/cheats_rt.c)
+     if (g_pad_obj && getenv("LARECOMP_DUMP_PAD") && frame % 600 == 0) {
+         const uint8_t *m = (const uint8_t *)(uintptr_t)(g_pad_obj - 0x98);
+         LOG("[pad] mgr %llx 4e0=%u 4e4=%u 4e8=%u 548=%#x 54c..=%02x %02x %02x 56c=%02x\n", g_pad_obj - 0x98,
+diff --git a/runtime/main.c b/runtime/main.c
+index 9089302..9bf409e 100644
+--- a/runtime/main.c
++++ b/runtime/main.c
+@@ -147,6 +147,7 @@ static void boot(const char *root) {
+     { extern void libcfast_configure(void); libcfast_configure(); }  // (runtime/hle/libcfast.c)
+     { extern void ngc_configure(void); ngc_configure(); }  // (runtime/services/misc.c: the SDK's profanity filter)
+     { extern void settings_load(void); settings_load(); }
++    { extern void cheats_rt_load(const char *exefs); cheats_rt_load(exefs); }  // (the player's cheats: hle/cheats_rt.c)
+     if (!g_oodle_server && !g_extract_shaders && !g_build_trees) { extern void pkm_link_apply(void); pkm_link_apply(); }  // (PKHeX Link, if on: hle/pkm_link.c)
+     kernel_init();
+     dispatch_init();
+diff --git a/runtime/ui/launcher_lg.mm b/runtime/ui/launcher_lg.mm
+index ef157bd..a66c50b 100644
+--- a/runtime/ui/launcher_lg.mm
++++ b/runtime/ui/launcher_lg.mm
+@@ -34,6 +34,7 @@
+ 
+ extern "C" void vk_describe_gpu(char *name, size_t n, int *vram_gb, bool *integrated);  // nvn/vulkan/device.c
+ extern "C" {
++#include "cheats.h"
+ #include "gamesetup.h"
+ #include "input_bind.h"
+ #include "mods.h"
+@@ -497,6 +498,125 @@ static void fail_text(int st) {
+         ImGui::PopTextWrapPos();
+ }
+ 
++// ------------------------------------------------------------------ the Mods page's Cheats tab (patches/0006)
++// Atmosphère cheat files (<build id>.txt, or a cheat database's zip): imported into <data>/cheats, each cheat on or
++// off (runtime/cheats.c); the game runs the ones that are on every frame (hle/cheats_rt.c), from its next start.
++static char g_pick_cheat[1024];
++static void SDLCALL picked_cheat(void *, const char *const *files, int) {
++    if (!files || !files[0]) return;
++    pthread_mutex_lock(&g_pick_lock);
++    snprintf(g_pick_cheat, sizeof g_pick_cheat, "%s", files[0]);
++    pthread_mutex_unlock(&g_pick_lock);
++}
++// main's code, as offsets from its base: the NSO header's text segment (memory offset +0x14, size +0x18)
++static bool main_text(const char *exefs, uint64_t *lo, uint64_t *hi) {
++    char p[1100];
++    snprintf(p, sizeof p, "%s/main", exefs);
++    FILE *f = fopen(p, "rb");
++    if (!f) return false;
++    uint8_t h[0x1C];
++    bool ok = fread(h, 1, sizeof h, f) == sizeof h && !memcmp(h, "NSO0", 4);
++    fclose(f);
++    if (!ok) return false;
++    uint32_t off, size;
++    memcpy(&off, h + 0x14, 4), memcpy(&size, h + 0x18, 4);
++    *lo = off, *hi = (uint64_t)off + size;
++    return true;
++}
++static void cheats_section(SDL_Window *win) {
++    static const SDL_DialogFileFilter filters[] = {{"Cheats (.txt, .zip)", "txt;zip"}, {"All files", "*"}};
++    static const char *const ex = "extracted/exefs";
++    static CheatList list;
++    static std::vector<char> on, code;  // (per cheat: on; patches the game's code)
++    static bool stale = true, msg_bad;
++    static char msg[320];
++    char bid[17], picked[1024];
++    bool have_game = cheats_build_id(ex, bid);
++    pthread_mutex_lock(&g_pick_lock);
++    snprintf(picked, sizeof picked, "%s", g_pick_cheat);
++    g_pick_cheat[0] = 0;
++    pthread_mutex_unlock(&g_pick_lock);
++    if (picked[0]) {
++        char why[256];
++        msg_bad = !cheats_import(picked, ex, why, sizeof why);
++        if (msg_bad) snprintf(msg, sizeof msg, "%s", why);
++        else snprintf(msg, sizeof msg, "%s", T("Cheats imported. Tick the ones you want: they work from the game's next start.",
++                                               "Cheats importados. Marque os que quiser: eles valem a partir do próximo início do jogo."));
++        stale = true;
++    }
++    if (stale) {
++        stale = false;
++        cheats_free(&list);
++        on.clear(), code.clear();
++        uint64_t lo = 0, hi = 0;
++        bool text = have_game && main_text(ex, &lo, &hi);
++        if (have_game && cheats_load(ex, &list) > 0)
++            for (int i = 0; i < list.n; i++) {
++                on.push_back(cheats_is_on(ex, list.c[i].name));
++                code.push_back(text && cheat_patches_code(&list.c[i], lo, hi));
++            }
++    }
++    ImGui::TextWrapped("%s", T("Atmosphère cheat files for Legends: Arceus 1.1.1: the <build id>.txt from a cheat site, or a cheat "
++                               "database's .zip (the file for this version is taken from it). Cheats that are on run while you play, "
++                               "from the game's next start. Back up your save before using cheats.",
++                               "Arquivos de cheats do Atmosphère para Legends: Arceus 1.1.1: o <build id>.txt de um site de cheats, "
++                               "ou o .zip de uma base de cheats (o arquivo desta versão é tirado dele). Os cheats ligados rodam "
++                               "enquanto você joga, a partir do próximo início do jogo. Faça backup do seu save antes de usar cheats."));
++    if (have_game) ImGui::TextDisabled(T("This game's build id: %s", "Build id deste jogo: %s"), bid);
++    ImGui::Spacing();
++    focus_first();
++    ImGui::BeginDisabled(!have_game);
++    if (ImGui::Button(T("Import cheats...", "Importar cheats..."))) SDL_ShowOpenFileDialog(picked_cheat, NULL, win, filters, 2, NULL, false);
++    ImGui::EndDisabled();
++    ImGui::SameLine();
++    bool any_on = false;
++    for (char o : on) any_on |= o != 0;
++    ImGui::BeginDisabled(!any_on);
++    if (ImGui::Button(T("Turn all off", "Desligar todos"))) cheats_all_off(ex), stale = true;
++    ImGui::EndDisabled();
++    ImGui::SameLine();
++    if (ImGui::Button(T("Open the cheats folder", "Abrir a pasta de cheats"))) {
++        open_folder("cheats");  // (made if it isn't there)
++    }
++    if (!have_game)
++        ImGui::TextDisabled("%s", T("Set up the game files first (Game Files): cheats are made for one version of the game.",
++                                    "Prepare os arquivos do jogo primeiro (Arquivos do jogo): cheats são feitos para uma versão do jogo."));
++    if (msg[0]) {
++        if (msg_bad) ImGui::TextColored(k_red, "%s", msg);
++        else ImGui::TextDisabled("%s", msg);
++    }
++    ImGui::Spacing();
++    if (have_game && list.n <= 0) {
++        ImGui::TextDisabled("%s", T("No cheats yet.", "Nenhum cheat ainda."));
++        return;
++    }
++    for (int i = 0; i < list.n; i++) {
++        const Cheat *c = &list.c[i];
++        ImGui::PushID(i);
++        if (c->master) {
++            ImGui::TextDisabled(T("%s (master code: runs whenever a cheat is on)", "%s (código mestre: roda sempre que um cheat está ligado)"), c->name);
++        } else if (!c->nop) {
++            ImGui::Spacing();
++            ImGui::TextColored(ImVec4(0.94f, 0.77f, 0.36f, 1), "%s", c->name);  // (a section label, or an empty cheat)
++        } else {
++            bool v = on[i] != 0;
++            ImGui::BeginDisabled(code[i] != 0);
++            if (ImGui::Checkbox(c->name, &v)) cheats_set_on(ex, c->name, v), on[i] = v;
++            ImGui::EndDisabled();
++            if (code[i]) {
++                ImGui::SameLine();
++                ImGui::TextDisabled("%s", T("(changes the game's code: can't work here)", "(muda o código do jogo: não funciona aqui)"));
++                if (ImGui::IsItemHovered())
++                    ImGui::SetTooltip("%s", T("This game is recompiled for your PC, so its code no longer runs from memory: a cheat "
++                                              "that rewrites instructions has nothing to change. Cheats that change values work.",
++                                              "Este jogo é recompilado para o seu PC, então o código dele não roda mais da memória: "
++                                              "um cheat que reescreve instruções não tem o que mudar. Cheats que mudam valores funcionam."));
++            }
++        }
++        ImGui::PopID();
++    }
++}
++
+ static void pickers(SDL_Window *win, int st) {
+     bool failed = st >= SETUP_FAIL_NOT_FOUND && !g_setup_from_folder;
+     static bool keys_looked;  // (prod.keys pre-filled once from the usual places: ~/.switch, the emulators)
+@@ -1059,7 +1179,8 @@ extern "C" void launcher_lg_run(const char *root) {
+     int page = PAGE_HOME;
+     if (const char *pg = getenv("LARECOMP_LAUNCHER_PAGE"))
+         page = !strcmp(pg, "options") ? PAGE_OPTIONS : !strcmp(pg, "controls") ? PAGE_CONTROLS : !strcmp(pg, "files") ? PAGE_FILES
+-             : !strcmp(pg, "mods") ? PAGE_MODS : PAGE_HOME;
++             : !strcmp(pg, "mods") || !strcmp(pg, "cheats") ? PAGE_MODS : PAGE_HOME;
++    bool open_cheats = getenv("LARECOMP_LAUNCHER_PAGE") && !strcmp(getenv("LARECOMP_LAUNCHER_PAGE"), "cheats");  // (the Mods page's Cheats tab)
+     if (getenv("LARECOMP_LAUNCHER_PAD") || getenv("LARECOMP_LAUNCHER_KEYS")) page = PAGE_CONTROLS;
+     // The launcher is a small fixed window; the game gets its own size (or fullscreen) after Play (below). (Made at
+     // that size; resized here when the window was there already - back from the game)
+@@ -1491,7 +1612,7 @@ extern "C" void launcher_lg_run(const char *root) {
+             d->AddText(bf, 44, ImVec2(36, 40), IM_COL32(240, 244, 255, 255), T(titles_en[page], titles_pt[page]));
+             ImGui::SetCursorScreenPos(ImVec2(W - 36 - 180, 26));
+             if (ImGui::Button(T("Back", "Voltar"), ImVec2(180, 0))) page = PAGE_HOME;
+-            pad_hints(d, W - 36 - 180 - 30, 36, true, page == PAGE_OPTIONS || page == PAGE_CONTROLS);
++            pad_hints(d, W - 36 - 180 - 30, 36, true, page == PAGE_OPTIONS || page == PAGE_CONTROLS || page == PAGE_MODS);
+             ImGui::SetCursorScreenPos(ImVec2(36, bar + 18));
+             ImGui::BeginChild("##page", ImVec2(W - 72, H - bar - 36));
+             ImGui::PushItemWidth(420);
+@@ -1527,8 +1648,15 @@ extern "C" void launcher_lg_run(const char *root) {
+                 ImGui::Spacing();
+                 focus_first();
+                 game_files_section(win);
+-            } else if (page == PAGE_MODS) {
+-                mods_page();
++            } else if (page == PAGE_MODS) {  // (two tabs: the mods, the cheats - patches/0006)
++                tab_begin(2);
++                if (ImGui::BeginTabBar("##modtabs")) {
++                    if (ImGui::BeginTabItem(T("Mods", "Mods"), NULL, tab_flags(0))) { tab_shown(0); ImGui::Spacing(); mods_page(); ImGui::EndTabItem(); }
++                    ImGuiTabItemFlags cf = open_cheats ? ImGuiTabItemFlags_SetSelected : 0;
++                    open_cheats = false;
++                    if (ImGui::BeginTabItem(T("Cheats", "Cheats"), NULL, cf | tab_flags(1))) { tab_shown(1); ImGui::Spacing(); cheats_section(win); ImGui::EndTabItem(); }
++                    ImGui::EndTabBar();
++                }
+             }
+             ImGui::PopItemWidth();
+             ImGui::EndChild();
+-- 
+2.34.1
+

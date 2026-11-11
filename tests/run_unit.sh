@@ -11,3 +11,7 @@ clang -std=gnu11 -O1 -g -Wall -Wno-unused-function -I"$S" -I"$S/nvn" -Iwork/src/
     tests/unit_test.c "$S/nxpkg.c" "$S/gamesetup.c" "$S/settings.c" tests/unit_stubs.c -o "$B/unit" \
     $(pkg-config --libs sdl3) -lpthread -lm
 "$B/unit"
+# the cheats (patches/0006): parser, VM and the player's cheat files; miniz reads / writes the test's zip
+clang -std=gnu11 -O1 -g -Wall -Wno-unused-function -I"$S" -Iwork/src/third_party \
+    tests/cheats_test.c "$S/cheats.c" work/src/third_party/miniz/miniz.c -o "$B/cheats" -lpthread -lm
+"$B/cheats"

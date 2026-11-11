@@ -1,4 +1,4 @@
-From 060120825554db5109307c89c7a9e2fb9a568415 Mon Sep 17 00:00:00 2001
+From 2ea0419ca96b5febe751be80ad293e0f3172dad0 Mon Sep 17 00:00:00 2001
 From: linuxopt <305337987+linuxopt@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 20:07:43 -0500
 Subject: [PATCH] nxpkg: open the picked package files with the picked

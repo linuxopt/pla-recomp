@@ -1,4 +1,4 @@
-From 3b6f82b4f4a9d58a147bcaf3d7abbd9ab2513227 Mon Sep 17 00:00:00 2001
+From c8518bac029ed8399c47c727587d3b6601759eeb Mon Sep 17 00:00:00 2001
 From: linuxopt <305337987+linuxopt@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 20:24:17 -0500
 Subject: [PATCH] Launcher: game code built again when only it is missing or
@@ -45,10 +45,10 @@ index ac0d866..cfa4f51 100644
  const char *game_name(const char *exefs);
  // The build of that exefs/main: one with address tables (runtime/fnhook.c, tools/patches.py) - the 60 fps and wild
 diff --git a/runtime/ui/launcher_lg.mm b/runtime/ui/launcher_lg.mm
-index d5aeea9..1524416 100644
+index 884a70f..58d707b 100644
 --- a/runtime/ui/launcher_lg.mm
 +++ b/runtime/ui/launcher_lg.mm
-@@ -1078,6 +1078,12 @@ extern "C" void launcher_lg_run(const char *root) {
+@@ -1069,6 +1069,12 @@ extern "C" void launcher_lg_run(const char *root) {
      const char *keys_test = getenv("LARECOMP_LAUNCHER_KEYS");
      if (keys_test && atoi(keys_test) > 0) bind_capture_begin(BIND_DEV_KEY, atoi(keys_test));
      if (getenv("LARECOMP_SETUP_DIR")) g_setup_from_folder = true, setup_start(getenv("LARECOMP_SETUP_DIR"));

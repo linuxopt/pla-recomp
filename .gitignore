@@ -2,3 +2,4 @@ cache/
 work/
 dist/
 *.AppImage
+.superpowers/

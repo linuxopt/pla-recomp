@@ -49,7 +49,11 @@ run() {
     APP=$!
     RUNLOG=$root/lasrecomp.log OUTLOG=$log
 }
-sync_log() { cat "$OUTLOG.out" "$RUNLOG" > "$OUTLOG" 2>/dev/null || true; }
+sync_log() {  # (and the game code build's own logs: the runtime deletes them when a build fails)
+    cat "$OUTLOG.out" "$RUNLOG" > "$OUTLOG" 2>/dev/null || true
+    local g=${RUNLOG%/lasrecomp.log}/extracted/.gamebuild
+    if [ -d "$g" ]; then mkdir -p "$OUTLOG.gamebuild"; cp -f "$g"/gen_*.log "$g"/link.log "$OUTLOG.gamebuild/" 2>/dev/null || true; fi
+}
 # wait_for <log> <pattern> <seconds>: the pattern appears (0), the app exits or time runs out (1)
 wait_for() {
     local log=$1 pat=$2 secs=$3 t=0
@@ -135,6 +139,17 @@ stale)
     grep -q "\[gamebuild\] done" "$log" || die "rebuild failed: $(grep gamebuild "$log" | tail -3)"
     [ "$(cat "$root/extracted/lasgame.so.id")" != 0000000000000000 ] || die "the id wasn't rewritten"
     say "ok: a stale game library is rebuilt"
+    ;;
+rebuild)  # (a data folder with game files but no game code: the self-rebuild alone, its logs kept - research)
+    root="$W/data setup"; log=$W/rebuild.log
+    [ -s "$root/extracted/romfs.bin" ] || die "run the setup phase first"
+    rm -f "$root/extracted/lasgame.so" "$root/extracted/lasgame.so.id"
+    run "$root" "$log" LARECOMP_PROC_LOG=1
+    wait_for "$log" '\[setup\] (ready|failed)|\[gamebuild\] failed' 3600 || { stop; die "the rebuild didn't finish"; }
+    stop
+    grep -E '\[gamebuild\]|\[proc\]|\[setup\]' "$log" | cut -c1-200
+    assert_ready "$root" "$log"
+    say "ok: the game code rebuilt by itself"
     ;;
 *) die "unknown phase $phase" ;;
 esac

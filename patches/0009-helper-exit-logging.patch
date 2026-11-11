@@ -1,0 +1,76 @@
+From d0aa7eb7a3aa15c20d1bd264b9090b107e4c90a6 Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 22:04:26 -0500
+Subject: [PATCH] Log how a helper process ended: its exit code, or the signal
+
+A generator that died showed only its log's last line - empty when it was
+killed - so a crash, a signal and a failed wait all looked the same.
+---
+ runtime/gamebuild.c      |  2 +-
+ runtime/platform/linux.c | 19 ++++++++++++++++++-
+ 2 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/runtime/gamebuild.c b/runtime/gamebuild.c
+index 37a673c..2d6dc0e 100644
+--- a/runtime/gamebuild.c
++++ b/runtime/gamebuild.c
+@@ -371,7 +371,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
+                     if (r != 0) {
+                         char last[300];
+                         log_tail(g->log, last, sizeof last);
+-                        LOG("[gamebuild] generator (%s) failed: %s\n", g->name, last);
++                        LOG("[gamebuild] generator (%s) failed (exit %d): %s\n", g->name, r, last);
+                         snprintf(why, why_size, "the game code couldn't be prepared");
+                         ok = false;
+                     }
+diff --git a/runtime/platform/linux.c b/runtime/platform/linux.c
+index 2ec33a3..10bb809 100644
+--- a/runtime/platform/linux.c
++++ b/runtime/platform/linux.c
+@@ -247,6 +247,19 @@ void plat_crash_handler_install(void) {
+ #include <sys/wait.h>
+ extern char **environ;
+ 
++// LARECOMP_PROC_LOG=1: every helper process started, waited for and ended, with its pid (research: who reaps what)
++static bool proc_log(void) {
++    static int on = -1;
++    if (on < 0) {
++        on = getenv("LARECOMP_PROC_LOG") && atoi(getenv("LARECOMP_PROC_LOG")) != 0;
++        struct sigaction sa;
++        if (on && sigaction(SIGCHLD, NULL, &sa) == 0)
++            fprintf(stderr, "[proc] SIGCHLD: %s%s\n", sa.sa_handler == SIG_IGN ? "ignored" : sa.sa_handler == SIG_DFL ? "default" : "a handler",
++                    sa.sa_flags & SA_NOCLDWAIT ? " (SA_NOCLDWAIT)" : "");
++    }
++    return on;
++}
++
+ PlatProc plat_spawn(const char *const argv[], const char *log_path, bool append_log) {
+     posix_spawn_file_actions_t fa;
+     posix_spawn_file_actions_init(&fa);
+@@ -261,10 +274,12 @@ PlatProc plat_spawn(const char *const argv[], const char *log_path, bool append_
+     int rc = posix_spawn(&pid, argv[0], &fa, &at, (char *const *)argv, environ);
+     posix_spawnattr_destroy(&at);
+     posix_spawn_file_actions_destroy(&fa);
++    if (proc_log()) fprintf(stderr, "[proc] spawn %d %s (thread %ld)\n", rc ? -1 : (int)pid, argv[0], (long)gettid());
+     return rc ? 0 : (PlatProc)pid;
+ }
+ 
+ void plat_proc_kill(PlatProc p) {
++    if (proc_log()) fprintf(stderr, "[proc] kill %d (thread %ld)\n", (int)p, (long)gettid());
+     kill(-(pid_t)p, SIGKILL);
+     waitpid((pid_t)p, NULL, 0);
+ }
+@@ -273,7 +288,9 @@ int plat_proc_wait(PlatProc p, bool block) {
+     int st = 0;
+     pid_t r = waitpid((pid_t)p, &st, block ? 0 : WNOHANG);
+     if (r == 0) return -1;
+-    if (r < 0) return 255;
++    if (proc_log() && r > 0) fprintf(stderr, "[proc] reaped %d (status %#x, thread %ld)\n", (int)p, st, (long)gettid());
++    if (r < 0) { fprintf(stderr, "[proc] %d: waitpid failed (%s)\n", (int)p, strerror(errno)); return 255; }
++    if (WIFSIGNALED(st)) fprintf(stderr, "[proc] %d: ended by signal %d (%s)\n", (int)p, WTERMSIG(st), strsignal(WTERMSIG(st)));
+     return WIFEXITED(st) ? WEXITSTATUS(st) : 255;
+ }
+ 
+-- 
+2.56.0
+

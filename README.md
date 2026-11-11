@@ -48,6 +48,14 @@ Shipped **off**, turned on in the launcher's Mods page:
 | **Legends Lua** | Lua 5.3 scripting for mod makers: scripts in `<data>/lua/`; an example in `<data>/lua-examples/`. Only run scripts you trust. |
 | **Steam relay** | Link Trades with Steam friends anywhere (Steam must be running). |
 
+Added by this AppImage (launcher, Options and Mods pages):
+
+| | |
+|---|---|
+| **Cheats** (Mods > Cheats) | Atmosphère cheat files for 1.1.1 (`AEE8F150DDA1B5A8.txt`, or a cheat database's `.zip`): *Import cheats...*, then tick each one on or off (all off at first). The ones on run while you play, from the game's next start. Only cheats that change values work: the game's code is recompiled, so cheats that rewrite instructions are greyed out ("changes the game's code: can't work here"). Back up your save first. No cheat codes are shipped. |
+| **Field of view** (Options > Graphics) | 40-100 degrees (the game: 50). The field camera widens; aiming and close-ups keep their zoom. Legends: Arceus 1.1.1 only. |
+| **Render scale / Upscaler** (Options > Graphics) | With Resolution on Automatic: render at 100 / 75 / 50 / 25 % of the window, or Dynamic (lowered to hold the frame rate); AMD FSR 1 or bilinear brings it up to the window. |
+
 ## Building it
 
 Needs podman (rootless). Everything else happens in a Debian 13 container, so the AppImage runs on older distros than
@@ -83,6 +91,9 @@ the build uses host networking.
 | `0004-rebuild-stale-game-code` | the game code is rebuilt by itself when the game files are set up but the code is missing or outdated |
 | `0005-launcher-minimize-crash` | the launcher no longer crashes when minimized on the home page (upstream divides by a zero-width banner) |
 | `0006-cheats` | Atmosphère cheat files (a `<build id>.txt` or a cheat database's `.zip`) in a Cheats tab on the Mods page; the ones ticked run every frame in Atmosphère's cheat VM. Cheats that rewrite the game's code can't work in a recompilation and are greyed out |
+| `0007-launcher-upscaling-options` | Render scale and Upscaler on the Graphics tab (both already in the renderer and `larecomp.ini`) |
+| `0008-field-of-view` | the Field of view setting: a hook on the camera update (`f_700193b65c`) widens the frame's render camera (`[[x0+0x3d0]+0x78]+0x1ec`) in tangent space |
+| `0009-helper-exit-logging` | the log says how a helper process ended (exit code or signal); `LARECOMP_PROC_LOG=1` traces every helper started, waited for and ended |
 
 Moving to a newer upstream: change `PIN_UPSTREAM_COMMIT` in `pins.env` and rebuild. A patch that no longer applies
 stops the build with its name: refresh it in `work/src` (edit, `git commit`, `git format-patch -1`).
@@ -91,11 +102,13 @@ stops the build with its name: refresh it in `work/src` (edit, `git commit`, `gi
 
 | | |
 |---|---|
-| `tests/run_unit.sh` | C unit tests of the patched reader, setup and settings, and of the cheats (parser, VM, import, on / off) (`./build.sh shell tests/run_unit.sh`) |
+| `tests/run_unit.sh` | C unit tests of the patched reader, setup and settings, the cheats (parser, VM, import, on / off) and the field of view (`./build.sh shell tests/run_unit.sh`) |
 | `tests/zig_shared.sh` | zig links a game-library-shaped `.so` against the runtime (`ZIG_DIR=` for the AppDir's trimmed zig) |
 | `tests/contents.sh` | the AppImage holds everything, nothing from the game, nothing needing glibc > 2.41 |
-| `tests/smoke.sh setup\|stale\|interrupt [dump]` | the AppImage end to end from an extracted dump, bundled tools only (no compiler or Python on PATH) |
+| `tests/smoke.sh setup\|stale\|interrupt\|rebuild [dump]` | the AppImage end to end from an extracted dump, bundled tools only (no compiler or Python on PATH) |
 | `tests/compat.sh` | the AppImage on a stock Debian 13 with a desktop's libraries: everything resolves, the launcher starts |
+| `tests/gui_pages.sh` | screenshots of the launcher's Game Files, Mods, Cheats, Options and Graphics pages on a virtual display (in a container) |
+| `tests/gui_minimize.sh` | the launcher survives being minimized (needs an X11 desktop and xdotool) |
 
 Never commit `cache/`, `work/` or `dist/` (gitignored): `work/` holds the recompiled game code of test runs.
 

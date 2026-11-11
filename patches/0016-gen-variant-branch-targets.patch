@@ -1,0 +1,47 @@
+From cca81620ee379cc723f2297263b6e7b73352aa2d Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 23:28:05 -0500
+Subject: [PATCH] gen.py: a code variant's branch target becomes a function
+ start
+
+A variant branching somewhere new (b / bl / b.cond to an address that wasn't a
+function start) rendered a call to f_<target>, which the function partitioning
+- run on the original words only - never made: the game library linked with
+an undefined function and failed to load, even with every cheat off. The
+targets of the variants' branches inside the module's code are added to the
+function starts, as the code's own branch targets are.
+---
+ tools/gen.py | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/tools/gen.py b/tools/gen.py
+index 1a2b1fd..dba5e02 100644
+--- a/tools/gen.py
++++ b/tools/gen.py
+@@ -803,7 +803,11 @@ def load_code_variants(m, path):
+         for w_s in words:
+             w = int(w_s, 16)
+             try:
+-                m.lifter.lift(w, a)
++                v = m.lifter.lift(w, a)
++                # (a variant that branches somewhere new: its target becomes a function start, as any branch target in
++                # the code does - else the variant calls a function that doesn't exist and the library won't load)
++                if v.kind in ('b', 'bl', 'bcond') and isinstance(getattr(v, 'target', None), int) and m.lo <= v.target < m.hi:
++                    m.variant_starts = getattr(m, 'variant_starts', set()) | {v.target}
+             except Exception as e:  # (Unsupported, or a decode the lifter doesn't expect)
+                 print(f'{m.name}: code variant {a:#x} = {w:#010x} left out: {e}', file=sys.stderr)
+                 skipped += 1
+@@ -862,8 +866,8 @@ def main():
+         RANDO_CODE.clear()
+     code_ok = load_code_variants(m, args.code_variants) if args.name == 'main' and args.code_variants else None
+     starts = m.boundaries()
+-    if getattr(m, 'cave_starts', None):  # (the code cheats' caves: functions of their own - load_code_variants)
+-        starts = sorted(set(starts) | set(m.cave_starts))
++    if getattr(m, 'cave_starts', None) or getattr(m, 'variant_starts', None):  # (the code cheats' caves and their
++        starts = sorted(set(starts) | set(getattr(m, 'cave_starts', [])) | getattr(m, 'variant_starts', set()))  # branches' targets)
+     hle = {}
+     if args.hle and os.path.exists(args.hle):
+         want = {l.strip() for l in open(args.hle) if l.strip() and not l.startswith('#')}
+-- 
+2.56.0
+

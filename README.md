@@ -105,11 +105,13 @@ scenes, but if a scripted scene ever stalls, set 60 or 30 fps in the game's Sett
 100 % catch rate, infinite PP, six IVs at 31, easy research tasks…), credited in [`cheats/CREDITS.txt`](cheats/CREDITS.txt).
 
 - All cheats start **off**. Tick the ones you want; they apply from the game's next start.
-- Cheats that **rewrite the game's code** need the game code rebuilt with them **once** for each cheat file (about as
-  long as the first setup). The launcher does it by itself when the cheat file changes, or click
-  **Rebuild the game code with these cheats**. After that every cheat switches on and off freely.
+- Cheats that **rewrite the game's code** are compiled into the game code. The bundled ones already are, from your first
+  setup. For a cheat file you import, those cheats show "(rebuild the game code first)" until you click
+  **Rebuild the game code with these cheats** (once per cheat file, about as long as the first setup). After that every
+  cheat switches on and off freely. Nothing is rebuilt unless you ask.
 - **Import cheats...** takes another Atmosphère cheat file for 1.1.1 (`AEE8F150DDA1B5A8.txt`) or a cheat database's
-  `.zip` (the file for this version is taken out of it). Your own import is never replaced by the bundled file.
+  `.zip` (the file for this version is taken out of it). Your own import is never replaced by the bundled file, and if
+  you delete the bundled file it stays deleted.
 - **Back up your save first** (`~/.local/share/plarecomp/save/`). Cheats change the game's memory directly.
 
 ## Mods and plugins
@@ -197,6 +199,11 @@ Applied in order on top of upstream `LegendsA` at `bc830dd` (v1.2.0-rc1):
 | `0010-code-cheats` | cheats that rewrite instructions: every fixed instruction write in the cheat file is compiled in next to the original (`gen.py --code-variants`, the randomizer's `RANDO_CODE` path; `rando_word` picks the word on), and the cheat VM's writes into main's code switch those variants; `lasgame.so.variants` says which list the game code has, and a different one rebuilds it |
 | `0011-gamebuild-closed-during-build` | closing the launcher mid-build is logged as that, not as a generator failure |
 | `0012-code-cheats-registers-caves` | code cheats written through a not-yet-set offset register, and code caves (new code past main's code, e.g. a master code's hook function, compiled as a function of its own) |
+| `0013-code-cheats-rebuild-opt-in` | a new cheat file no longer rebuilds the game code by itself: the Cheats tab offers it; the self-rebuild requires 1.1.1 |
+| `0014-cheats-master-code-checked` | the master code runs only when all its code (and cave) is compiled in, like any cheat |
+| `0015-code-cave-data` | a cave's code is what control flow reaches from the cheats' branches; the rest is the cave's data, written to memory (Inf Health) |
+| `0016-gen-variant-branch-targets` | a code variant's branch target becomes a function start (else the game code wouldn't load) |
+| `0017-setup-part-files` | the game data images are written as `.part` and renamed when complete: a setup cut short isn't taken as set up |
 
 Moving to a newer upstream: change `PIN_UPSTREAM_COMMIT` in `pins.env` and rebuild. A patch that no longer applies
 stops the build with its name: refresh it in `work/src` (edit, `git commit`, `git format-patch -1`).
@@ -206,9 +213,11 @@ stops the build with its name: refresh it in `work/src` (edit, `git commit`, `gi
 | | |
 |---|---|
 | `tests/run_unit.sh` | C unit tests of the patched reader, setup and settings, the cheats (parser, VM, import, on / off, code variants, caves) and the field of view (`./build.sh shell tests/run_unit.sh`) |
+| `tests/apprun_test.sh` | AppRun in a fake AppDir: the data folder is pinned for the runtime, shipped files seeded, bundled cheats seeded once |
+| `tests/gen_variants_test.py` | the generator's code-cheat variants and caves with the real lifter (`work/AppDir/python/bin/python3 -I tests/gen_variants_test.py work/src/tools`) |
 | `tests/zig_shared.sh` | zig links a game-library-shaped `.so` against the runtime (`ZIG_DIR=` for the AppDir's trimmed zig) |
 | `tests/contents.sh` | the AppImage holds everything, nothing from the game, nothing needing glibc > 2.41 |
-| `tests/smoke.sh setup\|stale\|interrupt\|rebuild\|quit [dump]` | the AppImage end to end from an extracted dump, bundled tools only (no compiler or Python on PATH), no window (SDL offscreen) |
+| `tests/smoke.sh setup\|play\|stale\|interrupt\|unpackkill\|rebuild\|quit [dump]` | the AppImage end to end from an extracted dump, bundled tools only (no compiler or Python on PATH), no window (SDL offscreen) |
 | `tests/compat.sh` | the AppImage on a stock Debian 13 with a desktop's libraries: everything resolves, the launcher starts |
 | `tests/gui_pages.sh` | screenshots of the launcher's Game Files, Mods, Cheats, Options and Graphics pages on a virtual display (in a container) |
 | `tests/gui_minimize.sh` | the launcher survives being minimized (needs an X11 desktop and xdotool) |

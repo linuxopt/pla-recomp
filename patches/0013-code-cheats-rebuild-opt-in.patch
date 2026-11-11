@@ -1,0 +1,58 @@
+From f14276850a40392b811251b90eaa7c9673e2c28f Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 23:23:35 -0500
+Subject: [PATCH] Code cheats: the rebuild for a new cheat file is offered, not
+ started by itself
+
+A changed cheat file made setup_needs_code true, so the next start deleted the
+working game library and rebuilt it unasked (10-30 minutes). Only the game
+code's own version starts a rebuild now; setup_code_cheats_built() tells the
+Cheats tab to offer "Rebuild the game code with these cheats". The self
+rebuild also requires Legends: Arceus 1.1.1, not any supported game.
+---
+ runtime/gamesetup.c | 6 ++++--
+ runtime/gamesetup.h | 3 +++
+ 2 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/runtime/gamesetup.c b/runtime/gamesetup.c
+index 60a15f8..6dcd761 100644
+--- a/runtime/gamesetup.c
++++ b/runtime/gamesetup.c
+@@ -136,7 +136,7 @@ bool setup_ready(void) {
+ 
+ // The code cheats the game code was built with (runtime/gamebuild.c: lasgame.so.variants' hash) are the imported
+ // cheat file's (patches/0010): "none" for both when there are none
+-static bool code_cheats_built(void) {
++bool setup_code_cheats_built(void) {
+     char want[17] = "none", have[64] = "none";
+     if (!cheats_variants_hash(ROOT "/exefs", want)) snprintf(want, sizeof want, "none");
+     FILE *f = fopen(ROOT "/" GAMELIB_NAME ".variants", "r");
+@@ -147,8 +147,10 @@ static bool code_cheats_built(void) {
+     return !strcmp(want, have);
+ }
+ 
++// (Only the game code's own version: a new cheat file doesn't start a rebuild by itself - the Cheats tab offers it,
++// patches/0013. And only for the build this AppImage plays: an older setup of another version is set up again instead.)
+ bool setup_needs_code(void) {
+-    return game_ok(ROOT "/exefs") && is_file(ROOT "/romfs.bin") && (!gamelib_present(ROOT) || !code_cheats_built());
++    return game_is_pla_111(ROOT "/exefs") && is_file(ROOT "/romfs.bin") && !gamelib_present(ROOT);
+ }
+ 
+ typedef struct { char exefs[1024], romfs[1024], romfs_bin[1024]; bool package; } Found;
+diff --git a/runtime/gamesetup.h b/runtime/gamesetup.h
+index cfa4f51..cfef6c6 100644
+--- a/runtime/gamesetup.h
++++ b/runtime/gamesetup.h
+@@ -39,6 +39,9 @@ bool setup_ready(void);
+ // The game files are set up there (exefs, romfs.bin) but the game code is missing or was built by another version of
+ // the recomp (its id): only the code needs building again (setup_start(NULL)), not the game files.
+ bool setup_needs_code(void);
++// The game code has the imported cheat file's code cheats compiled in (or there are none): false = the Cheats tab offers
++// "Rebuild the game code with these cheats" (setup_start(NULL)).
++bool setup_code_cheats_built(void);
+ // The game in that exefs/ folder: "Eevee", "Pikachu" or NULL.
+ const char *game_name(const char *exefs);
+ // The build of that exefs/main: one with address tables (runtime/fnhook.c, tools/patches.py) - the 60 fps and wild
+-- 
+2.56.0
+

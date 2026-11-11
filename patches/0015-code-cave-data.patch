@@ -1,0 +1,154 @@
+From e04c6fc40b8c0ea136b35d49312eb5866f45d600 Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 23:26:00 -0500
+Subject: [PATCH] Code caves: their data reaches memory; only the words reached
+ as code are compiled
+
+A master code's cave holds code and data: its literal loads read flags other
+cheats set (the GBAtemp file's "01# Inf Health" writes 1 after the cave's
+ret). Those writes were taken as cave code - compiled, and refused in memory -
+so the cave always read the original bytes and Inf Health could never work;
+two cheats writing one cave address also gave the variants file duplicate keys.
+Now the cave's code is what control flow reaches from the cheats' branches into
+the gap (b, bl, b.cond, cbz/cbnz, tbz/tbnz; stopping after ret, br and b), the
+first word written at an address; the rest of the gap's writes are data, which
+the runner writes to memory. Fixed writes that run off the end of a cut-off
+cheat are no longer read.
+---
+ runtime/cheats.c        | 66 +++++++++++++++++++++++++++++++++++++----
+ runtime/cheats.h        |  1 +
+ runtime/hle/cheats_rt.c |  8 +++--
+ 3 files changed, 67 insertions(+), 8 deletions(-)
+
+diff --git a/runtime/cheats.c b/runtime/cheats.c
+index 4570a13..d6bf718 100644
+--- a/runtime/cheats.c
++++ b/runtime/cheats.c
+@@ -388,15 +388,16 @@ static unsigned regs_set_by(const uint32_t *op, int n, int pc) {
+     }
+ }
+ 
+-int cheats_code_variants_cave(const CheatList *l, uint64_t code_lo, uint64_t code_hi, uint64_t gap_hi, CheatVariant *out,
+-                              int max) {
++// Every fixed write into main's code or the gap after it, as (offset, word, in the gap) - duplicates kept out
++static int fixed_code_writes(const CheatList *l, uint64_t code_lo, uint64_t code_hi, uint64_t gap_hi, CheatVariant *out,
++                             int max) {
+     int n = 0;
+     for (int i = 0; i < l->n; i++) {
+         const Cheat *c = &l->c[i];
+         unsigned set = 0;  // (registers this cheat has set so far)
+         for (int pc = 0; pc < c->nop;) {
+             int len = op_len(c->op, c->nop, pc);
+-            if (len == 0) break;
++            if (len == 0 || pc + len > c->nop) break;
+             uint32_t f = c->op[pc];
+             unsigned w = (f >> 24) & 0xF, m = (f >> 20) & 0xF, r = (f >> 16) & 0xF;
+             if (f >> 28 == 0 && m == CHEAT_MAIN && !(set >> r & 1) && (w == 4 || w == 8)) {  // (a fixed address)
+@@ -408,8 +409,8 @@ int cheats_code_variants_cave(const CheatList *l, uint64_t code_lo, uint64_t cod
+                     bool cave = off >= code_hi && off < gap_hi;
+                     if ((off < code_lo || off >= code_hi) && !cave) continue;
+                     if (off & 3) continue;
+-                    bool seen = false;
+-                    for (int j = 0; j < n && !seen; j++) seen = out[j].off == off && out[j].word == word;
++                    bool seen = false;  // (in the gap, the first word written at an address is the one: see below)
++                    for (int j = 0; j < n && !seen; j++) seen = out[j].off == off && (cave || out[j].word == word);
+                     if (!seen && n < max) out[n++] = (CheatVariant){off, word, cave};
+                 }
+             }
+@@ -420,6 +421,59 @@ int cheats_code_variants_cave(const CheatList *l, uint64_t code_lo, uint64_t cod
+     return n;
+ }
+ 
++// An instruction's control flow, for the cave walk: where it can branch (*to, or ~0) and whether it falls through
++static bool flows_on(uint32_t w, uint64_t at, uint64_t *to) {
++    *to = ~0ull;
++    if ((w & 0xFFFFFC1F) == 0xD65F0000 || (w & 0xFFFFFC1F) == 0xD61F0000) return false;  // ret, br
++    if ((w & 0x7C000000) == 0x14000000) {                                                // b, bl
++        int64_t d = (int64_t)((uint64_t)(w & 0x3FFFFFF) << 38) >> 36;
++        *to = at + (uint64_t)d;
++        return (w >> 31) != 0;  // (bl returns here: falls through; b doesn't)
++    }
++    int64_t d19 = (int64_t)((uint64_t)((w >> 5) & 0x7FFFF) << 45) >> 43, d14 = (int64_t)((uint64_t)((w >> 5) & 0x3FFF) << 50) >> 48;
++    if ((w & 0xFF000010) == 0x54000000 || (w & 0x7E000000) == 0x34000000) *to = at + (uint64_t)d19;  // b.cond, cbz / cbnz
++    else if ((w & 0x7E000000) == 0x36000000) *to = at + (uint64_t)d14;                            // tbz / tbnz
++    return true;
++}
++
++int cheats_code_variants_cave(const CheatList *l, uint64_t code_lo, uint64_t code_hi, uint64_t gap_hi, CheatVariant *out,
++                              int max) {
++    // A code cave holds code and data alike (its literal loads read flags other cheats set). Code is what control flow
++    // reaches from the cave's entries - the targets of the cheats' own branches into the gap: those words are compiled
++    // as code; the rest of the gap's writes are data, left out here (the runner writes them to memory).
++    enum { MAXW = 8192 };
++    CheatVariant *all = malloc(MAXW * sizeof *all);
++    if (!all) return 0;
++    int na = fixed_code_writes(l, code_lo, code_hi, gap_hi, all, MAXW), n = 0;
++    bool *code = calloc((size_t)na + 1, 1);
++    uint64_t *work = malloc(((size_t)na + 1) * sizeof *work);
++    int nw = 0;
++    for (int i = 0; code && work && i < na; i++) {  // (entries: branches from main's code into the gap)
++        uint64_t to;
++        if (all[i].cave) continue;
++        flows_on(all[i].word, all[i].off, &to);
++        if (to >= code_hi && to < gap_hi && nw < na) work[nw++] = to;
++    }
++    while (code && work && nw > 0) {
++        uint64_t a = work[--nw];
++        for (;;) {
++            int k = -1;
++            for (int i = 0; i < na && k < 0; i++) if (all[i].cave && all[i].off == a) k = i;
++            if (k < 0 || code[k]) break;  // (no word written there, or walked already)
++            code[k] = true;
++            uint64_t to;
++            bool on = flows_on(all[k].word, a, &to);
++            if (to >= code_hi && to < gap_hi && nw < na) work[nw++] = to;
++            if (!on) break;
++            a += 4;
++        }
++    }
++    for (int i = 0; i < na && n < max; i++)
++        if (!all[i].cave || (code && code[i])) out[n++] = all[i];
++    free(code), free(work), free(all);
++    return n;
++}
++
+ int cheats_code_variants(const CheatList *l, uint64_t code_lo, uint64_t code_hi, CheatVariant *out, int max) {
+     return cheats_code_variants_cave(l, code_lo, code_hi, code_hi, out, max);
+ }
+@@ -802,3 +856,5 @@ bool cheats_prepare(const char *exefs) {  // (the list worked out again and comp
+ bool cheat_runnable(const Cheat *c, uint64_t main_base, uint64_t code_lo, uint64_t code_hi, uint64_t gap_hi) {
+     return !cheat_patches_code(c, code_lo, gap_hi) || cheat_code_supported(c, main_base, code_lo, code_hi, gap_hi);
+ }
++
++bool cheat_code_site(uint64_t addr) { return site_find(addr, false) >= 0; }
+diff --git a/runtime/cheats.h b/runtime/cheats.h
+index 6d15e8c..71e76ca 100644
+--- a/runtime/cheats.h
++++ b/runtime/cheats.h
+@@ -114,3 +114,4 @@ bool cheats_prepare(const char *exefs);
+ // A cheat can run here: it changes no code, or all the code it writes (and its cave) is compiled in. The master code
+ // too - its hook switched on without its cave would jump into nothing (patches/0014).
+ bool cheat_runnable(const Cheat *c, uint64_t main_base, uint64_t code_lo, uint64_t code_hi, uint64_t gap_hi);
++bool cheat_code_site(uint64_t addr);  // a compiled-in variant's (or a cave's code word's) address
+diff --git a/runtime/hle/cheats_rt.c b/runtime/hle/cheats_rt.c
+index 99f6d25..d01911f 100644
+--- a/runtime/hle/cheats_rt.c
++++ b/runtime/hle/cheats_rt.c
+@@ -32,9 +32,11 @@ static bool rt_writable(uint64_t a, uint64_t n) {
+     if (!in_window(a, n)) return false;
+     for (int i = 0; i < g_nmodules; i++) {
+         const Module *m = &g_modules[i];
+-        // (code, the gap after it - a code cave's place, maybe on a read-only page - and read-only data: up to the data)
+-        uint64_t lo = m->base + m->text_off, hi = m->data_off > m->text_off ? m->base + m->data_off : m->base + m->ro_off + m->ro_size;
+-        if (overlaps(a, n, lo, hi - lo)) return false;
++        // (code and read-only data: never. The gap between them is a code cave's place: its code words - compiled in -
++        // are taken by code_write; the rest is the cave's data, which its literal loads read from memory: written)
++        if (overlaps(a, n, m->base + m->text_off, m->text_size) || overlaps(a, n, m->base + m->ro_off, m->ro_size)) return false;
++        for (uint64_t k = a & ~3ull; k < a + n; k += 4)
++            if (cheat_code_site(k)) return false;
+     }
+     pagewatch_prewrite(a, n);  // (the VM writes right after: host copies of watched pages see it)
+     return true;
+-- 
+2.56.0
+

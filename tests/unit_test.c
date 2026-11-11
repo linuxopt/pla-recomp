@@ -231,23 +231,26 @@ static int needs_code_nothing(void) {
     return ok;
 }
 
-// ---- patch 0010: the game code is built again when the imported code cheats change
+// ---- patches 0010 / 0013: code cheats need the game code built with them - offered, never started by itself
 static int needs_code_cheats(void) {
     int ok = 1;
     set_up_game_files();
     g_stub_gamelib_present = true;
-    CHECK(!setup_needs_code());  // (no cheats, no list: as built)
+    CHECK(!setup_needs_code() && setup_code_cheats_built());  // (no cheats, no list: as built)
     mkdir("cheats", 0755);
     write_file("cheats/AEE8F150DDA1B5A8.variants.json", "{\"code\": {\"0x1000\": [\"0x52800c80\"]}}\n", 37);
-    CHECK(setup_needs_code());   // (cheats imported, the game code built without them)
+    CHECK(!setup_needs_code());           // (a new cheat file: the game still plays - no rebuild unasked)
+    CHECK(!setup_code_cheats_built());    // (but its code cheats aren't built in: the Cheats tab offers the rebuild)
     write_file("extracted/lasgame.so.variants", "hash 0000000000000000\n", 22);
-    CHECK(setup_needs_code());   // (built for another cheat file)
+    CHECK(!setup_code_cheats_built());    // (built for another cheat file)
     char h[17];
     CHECK(cheats_variants_hash(ROOT_EXEFS, h));
     char line[64];
     snprintf(line, sizeof line, "hash %s\n0x1000 0x52800c80\n", h);
     write_file("extracted/lasgame.so.variants", line, strlen(line));
-    CHECK(!setup_needs_code());  // (built with them)
+    CHECK(setup_code_cheats_built());     // (built with them)
+    g_stub_gamelib_present = false;
+    CHECK(setup_needs_code());            // (the game code itself missing or another version's: rebuilt, as before)
     return ok;
 }
 

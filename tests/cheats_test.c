@@ -511,7 +511,7 @@ static int variants_offset_register(void) {  // 0TMR..: R is 0 at the start of a
 static int variants_cave(void) {  // words written past the end of the code (before read-only data): new code, a cave
     int ok = 1;
     CheatList l;
-    CHECK(cheats_parse("{Master}\n040A0000 00004000 52800020\n040A0000 00004004 D65F03C0\n040A0000 00001000 94000000\n", &l));
+    CHECK(cheats_parse("{Master}\n040A0000 00004000 52800020\n040A0000 00004004 D65F03C0\n040A0000 00001000 94000C00\n", &l));
     CheatVariant v[8];
     int n = cheats_code_variants_cave(&l, 0, 0x4000, 0x5000, v, 8);
     CHECK(n == 3);
@@ -573,6 +573,56 @@ static int prepare_stale_list(void) {  // a list made by an older version (other
     return ok;
 }
 
+static int runnable_master(void) {  // the master code is checked like any cheat: its code must be compiled in to run
+    int ok = 1;
+    CheatList l;
+    CHECK(cheats_parse("{Master}\n040A0000 00004000 52800020\n040A0000 00004004 D65F03C0\n040A0000 00001000 94000C00\n"
+                       "[Values only]\n04100000 00000010 00000001\n", &l));
+    cheat_code_reset();
+    CHECK(!cheat_runnable(&l.c[0], 0x7000000000ull, 0, 0x4000, 0x5000));  // (nothing compiled in: the hook would jump nowhere)
+    CHECK(cheat_runnable(&l.c[1], 0x7000000000ull, 0, 0x4000, 0x5000));   // (a value cheat: always)
+    cheat_code_add(0x7000001000ull, 0x94000C00);  // (the hook compiled in, but not its cave)
+    CHECK(!cheat_runnable(&l.c[0], 0x7000000000ull, 0, 0x4000, 0x5000));
+    cheat_code_add(0x7000004000ull, 0x52800020), cheat_code_add(0x7000004004ull, 0xD65F03C0);
+    CHECK(cheat_runnable(&l.c[0], 0x7000000000ull, 0, 0x4000, 0x5000));
+    cheats_free(&l);
+    return ok;
+}
+
+static int cave_code_vs_data(void) {  // in the gap: words reached as code are compiled, the rest is data (written to memory)
+    int ok = 1;
+    CheatList l;
+    CHECK(cheats_parse(
+        "{Master}\n"
+        "040A0000 00001000 94000C00\n"      // main+0x1000: bl 0x4000 (the hook)
+        "040A0000 00004000 34000062\n"      // 0x4000: cbz w2, 0x400c
+        "040A0000 00004004 52800020\n"      // 0x4004: mov w0, #1
+        "040A0000 00004008 D65F03C0\n"      // 0x4008: ret
+        "040A0000 0000400C 52800000\n"      // 0x400c: mov w0, #0  (reached only by the cbz)
+        "040A0000 00004010 D65F03C0\n"      // 0x4010: ret
+        "040A0000 00004018 00000000\n"      // 0x4018: a flag the cave reads (nothing branches here: data)
+        "[Turn the flag on]\n"
+        "040A0000 00004018 00000001\n", &l));
+    CheatVariant v[16];
+    int n = cheats_code_variants_cave(&l, 0, 0x4000, 0x5000, v, 16);
+    int code = 0, bl = 0;
+    bool data_in = false;
+    for (int i = 0; i < n; i++) {
+        if (v[i].cave) code++;
+        if (v[i].off == 0x1000) bl++;
+        if (v[i].off == 0x4018) data_in = true;
+    }
+    CHECK(bl == 1 && code == 5 && !data_in);
+    CHECK(n == 6);
+    // the table: the cave's code is compiled in; its data isn't a site (the runner writes it to memory)
+    cheat_code_reset();
+    for (int i = 0; i < n; i++) cheat_code_add(0x7000000000ull + v[i].off, v[i].word);
+    CHECK(cheat_code_site(0x7000004000ull) && cheat_code_site(0x700000400Cull) && !cheat_code_site(0x7000004018ull));
+    CHECK(cheat_runnable(&l.c[1], 0x7000000000ull, 0, 0x4000, 0x5000));  // (the flag cheat: data only - runs)
+    cheats_free(&l);
+    return ok;
+}
+
 int main(void) {
     struct { const char *name; int (*fn)(void); } tests[] = {
         {"parse_file", parse_file}, {"op0_store_static", op0_store_static}, {"op0_code_blocked", op0_code_blocked},
@@ -585,7 +635,8 @@ int main(void) {
         {"vm_code_redirect", vm_code_redirect}, {"code_built_list", code_built_list},
         {"prepare_copied_file", prepare_copied_file}, {"variants_offset_register", variants_offset_register},
         {"variants_cave", variants_cave}, {"variants_cave_file", variants_cave_file},
-        {"prepare_stale_list", prepare_stale_list},
+        {"prepare_stale_list", prepare_stale_list}, {"runnable_master", runnable_master},
+        {"cave_code_vs_data", cave_code_vs_data},
     };
     for (size_t i = 0; i < sizeof tests / sizeof *tests; i++) {
         g_run++;

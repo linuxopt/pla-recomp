@@ -23,14 +23,23 @@ if mkdir -p "$D/plugins" "$D/mods" "$D/lua-examples" 2>/dev/null; then
         n=$(basename "$m")
         [ -e "$D/mods/$n" ] || cp -R "$m" "$D/mods/$n"
     done
-    # the bundled cheats: copied only when the player has no cheat file of their own (an import is never replaced)
+    # the bundled cheats: copied once (cheats/.bundled marks it) and only where the player has no file of their own - an
+    # import is never replaced, and cheats the player deleted don't come back
     mkdir -p "$D/cheats" 2>/dev/null
-    for f in "$HERE"/cheats/*; do
-        [ -f "$f" ] && [ ! -e "$D/cheats/$(basename "$f")" ] && cp "$f" "$D/cheats/"
-    done
+    if [ ! -e "$D/cheats/.bundled" ]; then
+        for f in "$HERE"/cheats/*; do
+            [ -f "$f" ] && [ ! -e "$D/cheats/$(basename "$f")" ] && cp "$f" "$D/cheats/"
+        done
+        : > "$D/cheats/.bundled"
+    fi
     for f in "$HERE"/lua-examples/*; do
         [ -f "$f" ] && [ ! -e "$D/lua-examples/$(basename "$f")" ] && cp "$f" "$D/lua-examples/"
     done
 fi
 
+# The runtime is told the same data folder: left to itself it would take an extracted/ in the folder it was started
+# from (a source checkout's layout) as its data folder - a player's own extracted dump, say.
+export LARECOMP_DATA_ROOT="$D"
+unset PYTHONHOME PYTHONPATH  # (the bundled Python, which builds the game code, uses only its own modules)
+echo "PL:A Recomp: data and log in $D (lasrecomp.log)" >&2
 exec "$HERE/lasrecomp" "$@"

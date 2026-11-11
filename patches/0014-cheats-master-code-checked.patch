@@ -1,0 +1,64 @@
+From ea00d797066b2ccd52ce98b359d6021860cf42bd Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 23:24:04 -0500
+Subject: [PATCH] Cheats: the master code is checked like the others
+
+The master code was always taken. If the generator left part of its cave out
+(a word it couldn't translate) but kept the hook, turning any cheat on would
+switch the hook on and jump into nothing. cheat_runnable(): no code writes, or
+all of them (and the cave) compiled in - for the master code too; one that
+can't run is left out, with a log line.
+---
+ runtime/cheats.c        |  4 ++++
+ runtime/cheats.h        |  3 +++
+ runtime/hle/cheats_rt.c | 10 ++++++++--
+ 3 files changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/runtime/cheats.c b/runtime/cheats.c
+index d7a8d01..4570a13 100644
+--- a/runtime/cheats.c
++++ b/runtime/cheats.c
+@@ -798,3 +798,7 @@ bool cheats_prepare(const char *exefs) {  // (the list worked out again and comp
+     free(text);
+     return ok;
+ }
++
++bool cheat_runnable(const Cheat *c, uint64_t main_base, uint64_t code_lo, uint64_t code_hi, uint64_t gap_hi) {
++    return !cheat_patches_code(c, code_lo, gap_hi) || cheat_code_supported(c, main_base, code_lo, code_hi, gap_hi);
++}
+diff --git a/runtime/cheats.h b/runtime/cheats.h
+index 1fa17ff..6d15e8c 100644
+--- a/runtime/cheats.h
++++ b/runtime/cheats.h
+@@ -111,3 +111,6 @@ bool cheat_code_supported(const Cheat *c, uint64_t main_base, uint64_t code_lo,
+ // The variants list made again when the cheat file is newer than it (or it is missing): a cheat file copied into
+ // <data>/cheats by hand or by the AppImage (its bundled one) gets its code cheats too. false: couldn't write it.
+ bool cheats_prepare(const char *exefs);
++// A cheat can run here: it changes no code, or all the code it writes (and its cave) is compiled in. The master code
++// too - its hook switched on without its cave would jump into nothing (patches/0014).
++bool cheat_runnable(const Cheat *c, uint64_t main_base, uint64_t code_lo, uint64_t code_hi, uint64_t gap_hi);
+diff --git a/runtime/hle/cheats_rt.c b/runtime/hle/cheats_rt.c
+index a9dd34e..99f6d25 100644
+--- a/runtime/hle/cheats_rt.c
++++ b/runtime/hle/cheats_rt.c
+@@ -66,9 +66,15 @@ void cheats_rt_load(const char *exefs) {
+     for (int i = 0; take && i < l.n; i++) {
+         Cheat *c = &l.c[i];
+         if (!c->nop) continue;
+-        if (c->master) { if (master < 0) master = i, take[i] = true, total += c->nop; continue; }
++        bool runnable = cheat_runnable(c, main_base, text, text + text_n, ro_at);
++        if (c->master) {  // (checked as any cheat: a hook switched on without its cave would jump into nothing)
++            if (master >= 0) continue;
++            if (!runnable) { LOG("[cheats] the master code \"%s\" changes code the game code wasn't built with: left out\n", c->name); continue; }
++            master = i, take[i] = true, total += c->nop;
++            continue;
++        }
+         if (!cheats_is_on(exefs, c->name)) continue;
+-        if (cheat_patches_code(c, text, ro_at) && !cheat_code_supported(c, main_base, text, text + text_n, ro_at)) {
++        if (!runnable) {
+             LOG("[cheats] \"%s\" changes the game's code, and the game code wasn't built with it: skipped\n", c->name);
+             continue;
+         }
+-- 
+2.56.0
+

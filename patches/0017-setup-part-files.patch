@@ -1,0 +1,86 @@
+From 71122c093ed123276a289debcf0509ce062ea227 Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 23:29:50 -0500
+Subject: [PATCH] Setup: the game data images written as .part, renamed when
+ complete
+
+romfs.bin (and dlc.bin) were written in place: a setup cut short while writing
+the 6 GB image (the app closed) left a partial romfs.bin, which the next start
+took as set up - the game code was rebuilt on it (patch 0004) and the game
+then failed on missing data. Each image is written as <name>.part and renamed
+once complete, on every path (from the packages, copied, built from a folder);
+setup cleanup knows the .part names.
+---
+ runtime/gamesetup.c | 21 +++++++++++++++++----
+ runtime/paths.c     |  2 +-
+ 2 files changed, 18 insertions(+), 5 deletions(-)
+
+diff --git a/runtime/gamesetup.c b/runtime/gamesetup.c
+index 6dcd761..8c52a7a 100644
+--- a/runtime/gamesetup.c
++++ b/runtime/gamesetup.c
+@@ -208,6 +208,17 @@ static void build_progress(double f, const char *step) {
+                                                                                            : SETUP_COMPILING;
+ }
+ 
++// The game data images are written as <name>.part and renamed when complete: a setup cut short (the app closed while
++// writing 6 GB) leaves no romfs.bin to be taken as set up - the code would be rebuilt on half an image (patches/0017)
++static bool finish_part(const char *path) {
++    char part[1100];
++    snprintf(part, sizeof part, "%s.part", path);
++    if (rename(part, path) == 0) return true;
++    LOG("[setup] %s couldn't be put in place\n", path);
++    remove(part);
++    return false;
++}
++
+ // From the player's packages: the exefs of each update found (newest first, then the base game alone) is unpacked
+ // into a scratch folder until one is a supported game; then the old game files go and that exefs, the RomFS image
+ // (base + that update) and any add-on content are written into extracted/.
+@@ -263,11 +274,13 @@ static bool from_packages(void) {
+     g_phase0 = 0, g_phase1 = 0.15f;
+     why[0] = 0;
+     bool read_err = false;
+-    if (ok && !nxpkg_write_romfs(p, pick, ROOT "/romfs.bin", copy_progress, why, sizeof why)) {
++    if (ok && !nxpkg_write_romfs(p, pick, ROOT "/romfs.bin.part", copy_progress, why, sizeof why)) {
+         LOG("[setup] romfs image: %s\n", why);
+         ok = false, read_err = !strstr(why, "can't");  // (else: the image couldn't be written - disk space)
+     }
+-    if (ok && nxpkg_write_dlc(p, ROOT "/dlc.bin", why, sizeof why)) LOG("[setup] add-on content written\n");
++    if (ok && !finish_part(ROOT "/romfs.bin")) ok = false;
++    if (ok && nxpkg_write_dlc(p, ROOT "/dlc.bin.part", why, sizeof why) && finish_part(ROOT "/dlc.bin"))
++        LOG("[setup] add-on content written\n");
+     nxpkg_close(p);
+     if (!ok) g_state = read_err ? SETUP_FAIL_UNPACK : SETUP_FAIL_COPY;
+     return ok;
+@@ -343,12 +356,12 @@ static void *setup_thread(void *arg) {
+         ok = romfs_copy_tree(f.exefs, ROOT "/exefs", copy_progress);
+     if (ok && f.romfs_bin[0]) {
+         g_phase0 = 0.01f, g_phase1 = 0.15f;
+-        ok = romfs_copy_file(f.romfs_bin, ROOT "/romfs.bin", copy_progress);
++        ok = romfs_copy_file(f.romfs_bin, ROOT "/romfs.bin.part", copy_progress) && finish_part(ROOT "/romfs.bin");
+     } else if (ok) {
+         g_state = SETUP_IMAGE;
+         g_phase0 = 0.01f, g_phase1 = 0.15f;
+         char why[256] = "";
+-        ok = romfs_build(f.romfs, ROOT "/romfs.bin", copy_progress, why, sizeof why);
++        ok = romfs_build(f.romfs, ROOT "/romfs.bin.part", copy_progress, why, sizeof why) && finish_part(ROOT "/romfs.bin");
+         if (!ok) LOG("[setup] romfs image: %s\n", why);
+     }
+     if (!ok) g_state = SETUP_FAIL_COPY;
+diff --git a/runtime/paths.c b/runtime/paths.c
+index 7f3f422..82ce7bd 100644
+--- a/runtime/paths.c
++++ b/runtime/paths.c
+@@ -142,7 +142,7 @@ bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n) {
+ // ---- game files
+ // What the setup (runtime/ui/launcher.mm) creates in extracted/, plus what older versions' extraction and manual
+ // extractions left there (never read at run time).
+-static const char *const GAME_FILES[] = {"exefs", "romfs", "romfs.bin", GAMELIB_NAME, GAMELIB_NAME ".id", GAMELIB_NAME ".variants", ".gamebuild",
++static const char *const GAME_FILES[] = {"exefs", "romfs", "romfs.bin", "romfs.bin.part", "dlc.bin", "dlc.bin.part", GAMELIB_NAME, GAMELIB_NAME ".id", GAMELIB_NAME ".variants", ".gamebuild",
+                                          ".extract", "extract.log", "xci_secure", "nso_raw", "update_pfs", ".DS_Store"};
+ 
+ // game_dir must be <data root>/extracted, a real folder (a dev worktree's symlinked extracted/ is refused)
+-- 
+2.56.0
+

@@ -168,5 +168,38 @@ quit)  # (the launcher closed mid-build - a quit signal, as a closed window: the
     grep -q "generator (.*) failed" "$log" && die "still reported as a generator failure"
     say "ok: closing mid-build is reported as that"
     ;;
+unpackkill)  # (closed while the game data image is written: the next start must not take the half-written image)
+    root="$W/data unpackkill"; log=$W/unpackkill1.log
+    rm -rf "$root"
+    run "$root" "$log" LARECOMP_SETUP_DIR="$(view)"
+    img=""
+    for i in $(seq 6000); do  # (until the image is part written - 20 MB of its 6.4 GB: it goes fast, polled every 50 ms)
+        img=$(ls -S "$root"/extracted/romfs.bin* 2>/dev/null | head -1 || true)
+        [ -n "$img" ] && [ "$(stat -c %s "$img" 2>/dev/null || echo 0)" -gt 20000000 ] && break
+        sleep 0.05
+    done
+    [ -n "$img" ] || { stop; die "the image wasn't being written"; }
+    stop
+    say "closed while writing the image ($(basename "$img"), $(( $(stat -c %s "$img") / 1000000 )) MB)"
+    log=$W/unpackkill2.log
+    run "$root" "$log"
+    sleep 20
+    stop
+    grep -q "the game code needs building again" "$log" && die "a half-written image was taken as set up: the game code was rebuilt on it"
+    grep -q "\[setup\] ready" "$log" && die "a half-written image reported ready"
+    [ -e "$root/extracted/romfs.bin" ] && die "romfs.bin exists after the setup was cut short"
+    say "ok: a cut-short setup is not taken as set up"
+    ;;
+play)  # (the setup phase's data folder: the game started straight from the launcher - its code loads and it runs)
+    root="$W/data setup"; log=$W/play.log
+    assert_ready "$root" "$W/setup.log"
+    run "$root" "$log" LARECOMP_LAUNCHER_AUTOPLAY=1
+    wait_for "$log" '\[vk\] t=[0-9.]+ frame [0-9]+' 300 || { stop; die "the game didn't start drawing: $(grep -E 'FATAL|rror|\[gamelib\]|\[cheats\]' "$log" | tail -4)"; }
+    sleep 10
+    stop
+    grep -E 'FATAL|dlopen|built for another version|undefined symbol' "$log" && die "the game code didn't load"
+    grep -E '\[cheats\]' "$log" | head -3
+    say "ok: the game runs ($(grep -oE '\[vk\] t=[0-9.]+ frame [0-9]+ [0-9.]+ fps' "$log" | tail -1))"
+    ;;
 *) die "unknown phase $phase" ;;
 esac

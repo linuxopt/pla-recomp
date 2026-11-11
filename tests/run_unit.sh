@@ -8,7 +8,7 @@ S=work/src/runtime
 B=$(mktemp -d "${TMPDIR:-/tmp}/unit.XXXXXX")
 trap 'rm -rf "$B"' EXIT
 clang -std=gnu11 -O1 -g -Wall -Wno-unused-function -I"$S" -I"$S/nvn" -Iwork/src/third_party -I/usr/local/include \
-    tests/unit_test.c "$S/nxpkg.c" "$S/gamesetup.c" "$S/settings.c" tests/unit_stubs.c -o "$B/unit" \
+    tests/unit_test.c "$S/nxpkg.c" "$S/gamesetup.c" "$S/settings.c" "$S/cheats.c" work/src/third_party/miniz/miniz.c tests/unit_stubs.c -o "$B/unit" \
     $(pkg-config --libs sdl3) -lpthread -lm
 "$B/unit"
 # the cheats (patches/0006): parser, VM and the player's cheat files; miniz reads / writes the test's zip

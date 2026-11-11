@@ -69,6 +69,8 @@ cp "$B/pgo.profdata" "$A/gamelib-src/pgo.profdata"
 # ---- shipped extras, all off until turned on in the Mods page
 cp -R "$S"/contrib/mods/. "$A/mods/"
 cp "$S/contrib/legendslua/research/pla_research.lua" "$A/lua-examples/"
+# the bundled cheat file (cheats/: the GBAtemp database's 1.1.1 file, with its credits) - off until switched on
+mkdir -p "$A/cheats" && cp cheats/AEE8F150DDA1B5A8.txt cheats/CREDITS.txt "$A/cheats/"
 
 # ---- the AppImage's own files
 cp appimage/AppRun "$A/AppRun" && chmod 755 "$A/AppRun"

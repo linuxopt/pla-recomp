@@ -340,6 +340,161 @@ static int toggles_saved(void) {  // on / off by name, kept across loads and acr
     return ok;
 }
 
+// ---- code cheats (patches/0010): fixed instruction writes become variants compiled into the game code
+static const char *CODE_TEXT =
+    "[Always Level 100]\n"
+    "04000000 00001000 52800C80\n"           // (main + 0x1000: an instruction)
+    "[Level Off]\n"
+    "04000000 00001000 B9400000\n"           // (the same instruction, another word: the "Off" cheat)
+    "[Two at once]\n"
+    "08000000 00002000 D503201F 52800020\n"  // (8 bytes: main + 0x2000 = 0x52800020, main + 0x2004 = 0xD503201F)
+    "[Data only]\n"
+    "04000000 00005000 00000001\n";          // (main's data: not a variant)
+
+static int variants_list(void) {
+    int ok = 1;
+    CheatList l;
+    CHECK(cheats_parse(CODE_TEXT, &l));
+    CheatVariant v[16];
+    int n = cheats_code_variants(&l, 0, 0x4000, v, 16);
+    CHECK(n == 4);
+    bool a = false, b = false, c = false, d = false;
+    for (int i = 0; i < n; i++) {
+        a |= v[i].off == 0x1000 && v[i].word == 0x52800C80;
+        b |= v[i].off == 0x1000 && v[i].word == 0xB9400000;
+        c |= v[i].off == 0x2000 && v[i].word == 0x52800020;
+        d |= v[i].off == 0x2004 && v[i].word == 0xD503201F;
+    }
+    CHECK(a && b && c && d);
+    CHECK(cheats_code_variants(&l, 0, 0x4000, v, 2) == 2);  // (room for 2: the first 2)
+    cheats_free(&l);
+    return ok;
+}
+
+static int variants_file(void) {  // <data>/cheats/<build id>.variants.json, as tools/gen.py --code-variants reads it
+    int ok = 1;
+    fresh_tmp();
+    exefs_with_build(PLA_111);
+    uint8_t text_size[4] = {0x00, 0x40, 0x00, 0x00};  // (main's text: offset 0, 0x4000 bytes)
+    FILE *f = fopen("extracted/exefs/main", "r+b");
+    fseek(f, 0x18, SEEK_SET), fwrite(text_size, 1, 4, f), fclose(f);
+    write_file("c.txt", CODE_TEXT, strlen(CODE_TEXT));
+    char why[256] = "";
+    CHECK(cheats_import("c.txt", "extracted/exefs", why, sizeof why));  // (import writes the variants too)
+    char p[PATH_MAX];
+    CHECK(cheats_variants_path("extracted/exefs", p, sizeof p));
+    FILE *j = fopen(p, "rb");
+    CHECK(j != NULL);
+    char buf[2048] = "";
+    if (j) { buf[fread(buf, 1, sizeof buf - 1, j)] = 0; fclose(j); }
+    CHECK(strstr(buf, "\"code\"") && strstr(buf, "\"0x1000\"") && strstr(buf, "\"0x52800c80\"") && strstr(buf, "\"0xb9400000\"") &&
+          strstr(buf, "\"0x2004\"") && !strstr(buf, "\"0x5000\""));
+    char h1[17], h2[17];
+    CHECK(cheats_variants_hash("extracted/exefs", h1) && strlen(h1) == 16);
+    write_file("d.txt", FILE_TEXT, strlen(FILE_TEXT));  // (another file: other variants, another hash)
+    CHECK(cheats_import("d.txt", "extracted/exefs", why, sizeof why) && cheats_variants_hash("extracted/exefs", h2) && strcmp(h1, h2));
+    return ok;
+}
+
+static int code_table(void) {  // which word is on at each variant site
+    int ok = 1;
+    cheat_code_reset();
+    CHECK(cheat_code_add(0x7000001000ull, 0x52800C80) && cheat_code_add(0x7000001000ull, 0xB9400000));
+    CHECK(cheat_code_word(0x7000001000ull) == CHEAT_CODE_ORIGINAL);   // (nothing on: the game's own)
+    CHECK(cheat_code_word(0x7000009000ull) == CHEAT_CODE_ORIGINAL);   // (not a site)
+    uint32_t w = 0x52800C80;
+    CHECK(cheat_code_write(0x7000001000ull, &w, 4) && cheat_code_word(0x7000001000ull) == 0x52800C80);
+    w = 0x11111111;  // (a word that isn't compiled in - e.g. the original, restored by an "Off" cheat): back to the game's
+    CHECK(cheat_code_write(0x7000001000ull, &w, 4) && cheat_code_word(0x7000001000ull) == CHEAT_CODE_ORIGINAL);
+    CHECK(!cheat_code_write(0x7000009000ull, &w, 4));                 // (not a site: refused)
+    CHECK(!cheat_code_write(0x7000001001ull, &w, 4));                 // (unaligned)
+    uint64_t two = 0xD503201F52800020ull;
+    CHECK(cheat_code_add(0x7000002000ull, 0x52800020) && cheat_code_add(0x7000002004ull, 0xD503201F));
+    CHECK(cheat_code_write(0x7000002000ull, &two, 8) && cheat_code_word(0x7000002000ull) == 0x52800020 &&
+          cheat_code_word(0x7000002004ull) == 0xD503201F);
+    cheat_code_reset();
+    CHECK(cheat_code_word(0x7000002000ull) == CHEAT_CODE_ORIGINAL);
+    return ok;
+}
+
+static bool g_redirect_seen;
+static bool fake_code_write(uint64_t a, const void *v, unsigned n) {
+    uint32_t w;
+    memcpy(&w, v, 4);
+    g_redirect_seen = a == MAIN + 0x1000 && n == 4 && w == 0x52800C80;
+    return true;
+}
+static int vm_code_redirect(void) {  // the VM: a write into main's code goes to code_write, not refused
+    int ok = 1;
+    clear();
+    CheatEnv e = env(0);
+    e.code_write = fake_code_write;
+    CheatState st = {{0}};
+    uint32_t ops[] = {0x04000000, 0x00001000, 0x52800C80};
+    g_redirect_seen = false;
+    CHECK(cheat_vm_run(ops, 3, &e, &st) == CHEAT_OK && g_redirect_seen);
+    uint32_t v;
+    memcpy(&v, g_main + 0x1000, 4);
+    CHECK(v == 0);  // (memory untouched: the variant is picked instead)
+    return ok;
+}
+
+static int code_built_list(void) {  // the list the game code was built with: loaded only if it is for this cheat file
+    int ok = 1;
+    fresh_tmp();
+    exefs_with_build(PLA_111);
+    uint8_t text_size[4] = {0x00, 0x40, 0x00, 0x00};
+    FILE *f = fopen("extracted/exefs/main", "r+b");
+    fseek(f, 0x18, SEEK_SET), fwrite(text_size, 1, 4, f), fclose(f);
+    write_file("c.txt", CODE_TEXT, strlen(CODE_TEXT));
+    char why[256], h[17], list[512];
+    CHECK(cheats_import("c.txt", "extracted/exefs", why, sizeof why) && cheats_variants_hash("extracted/exefs", h));
+    // the generator left 0x2004 out (say): the list has the other three
+    snprintf(list, sizeof list, "hash %s\n0x1000 0x52800c80\n0x1000 0xb9400000\n0x2000 0x52800020\n", h);
+    write_file("extracted/lasgame.so.variants", list, strlen(list));
+    CHECK(cheats_code_load("extracted/exefs", "extracted/lasgame.so.variants", 0x7000000000ull) == 3);
+    CheatList l;
+    CHECK(cheats_load("extracted/exefs", &l) == 4);
+    CHECK(cheat_code_supported(&l.c[0], 0x7000000000ull, 0, 0x4000));   // (Always Level 100: compiled in)
+    CHECK(cheat_code_supported(&l.c[1], 0x7000000000ull, 0, 0x4000));   // (its Off)
+    CHECK(!cheat_code_supported(&l.c[2], 0x7000000000ull, 0, 0x4000));  // (Two at once: half of it left out)
+    CHECK(cheat_code_supported(&l.c[3], 0x7000000000ull, 0, 0x4000));   // (no code writes: nothing needed)
+    cheats_free(&l);
+    // a list for another cheat file (an older import): not loaded, nothing on
+    write_file("extracted/lasgame.so.variants", "hash 0123456789abcdef\n0x1000 0x52800c80\n", 40);
+    CHECK(cheats_code_load("extracted/exefs", "extracted/lasgame.so.variants", 0x7000000000ull) == -1);
+    CHECK(cheat_code_word(0x7000001000ull) == CHEAT_CODE_ORIGINAL);
+    uint32_t w = 0x52800C80;
+    CHECK(!cheat_code_write(0x7000001000ull, &w, 4));  // (no sites)
+    return ok;
+}
+
+static int prepare_copied_file(void) {  // a cheat file copied in (the AppImage's bundled one): its variants made on demand
+    int ok = 1;
+    fresh_tmp();
+    exefs_with_build(PLA_111);
+    uint8_t text_size[4] = {0x00, 0x40, 0x00, 0x00};
+    FILE *f = fopen("extracted/exefs/main", "r+b");
+    fseek(f, 0x18, SEEK_SET), fwrite(text_size, 1, 4, f), fclose(f);
+    mkdir("cheats", 0755);
+    write_file("cheats/AEE8F150DDA1B5A8.txt", CODE_TEXT, strlen(CODE_TEXT));
+    char h[17], p[PATH_MAX];
+    CHECK(!cheats_variants_hash("extracted/exefs", h));  // (none yet)
+    CHECK(cheats_prepare("extracted/exefs"));
+    CHECK(cheats_variants_hash("extracted/exefs", h));
+    CHECK(cheats_variants_path("extracted/exefs", p, sizeof p));
+    struct stat st1, st2;
+    stat(p, &st1);
+    CHECK(cheats_prepare("extracted/exefs"));  // (up to date: left as it is)
+    stat(p, &st2);
+    CHECK(st1.st_mtime == st2.st_mtime && st1.st_ino == st2.st_ino);  // (not written again)
+    fresh_tmp();
+    exefs_with_build(PLA_111);
+    CHECK(cheats_prepare("extracted/exefs"));  // (no cheat file: nothing to do, not an error)
+    CHECK(!cheats_variants_hash("extracted/exefs", h));
+    return ok;
+}
+
 int main(void) {
     struct { const char *name; int (*fn)(void); } tests[] = {
         {"parse_file", parse_file}, {"op0_store_static", op0_store_static}, {"op0_code_blocked", op0_code_blocked},
@@ -348,6 +503,9 @@ int main(void) {
         {"opA_store_reg", opA_store_reg}, {"opC_registers", opC_registers}, {"bad_and_bounded", bad_and_bounded},
         {"code_patch_detect", code_patch_detect}, {"build_id_name", build_id_name}, {"import_txt", import_txt},
         {"import_zip", import_zip}, {"toggles_saved", toggles_saved},
+        {"variants_list", variants_list}, {"variants_file", variants_file}, {"code_table", code_table},
+        {"vm_code_redirect", vm_code_redirect}, {"code_built_list", code_built_list},
+        {"prepare_copied_file", prepare_copied_file},
     };
     for (size_t i = 0; i < sizeof tests / sizeof *tests; i++) {
         g_run++;

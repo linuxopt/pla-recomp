@@ -1,0 +1,663 @@
+From cd6ed0212c64cbddf585351940c8813a9c86d293 Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 22:36:29 -0500
+Subject: [PATCH] Code cheats: instruction writes compiled in as switchable
+ variants
+
+A recompiled game can't run rewritten instructions from memory, so a cheat that
+patches main's code did nothing. Now every fixed instruction write in the
+imported cheat file (any cheat, on or off) is listed (cheats/<build
+id>.variants.json, made at import and by cheats_prepare for a file copied in)
+and the generator compiles each word next to the original instruction
+(gen.py --code-variants, through the randomizer's RANDO_CODE path: a word the
+lifter can't translate is left out and said). rando_word picks the word on at
+run time; the cheat VM's write into main's code switches a compiled-in variant
+on (CheatEnv.code_write) instead of being refused. The game library records
+the list it was built with (lasgame.so.variants); a different cheat file makes
+the game code be built again (setup_needs_code), and the Cheats tab offers the
+rebuild. Code cheats then toggle like any other.
+---
+ runtime/cheats.c          | 186 +++++++++++++++++++++++++++++++++++++-
+ runtime/cheats.h          |  34 +++++++
+ runtime/gamebuild.c       |  24 +++++
+ runtime/gamesetup.c       |  16 +++-
+ runtime/hle/cheats_rt.c   |  17 +++-
+ runtime/paths.c           |   2 +-
+ runtime/ui/launcher_lg.mm |  68 ++++++++------
+ tools/gen.py              |  39 ++++++++
+ 8 files changed, 353 insertions(+), 33 deletions(-)
+
+diff --git a/runtime/cheats.c b/runtime/cheats.c
+index 297b369..07f16c1 100644
+--- a/runtime/cheats.c
++++ b/runtime/cheats.c
+@@ -27,7 +27,10 @@ static uint64_t mem_read(const CheatEnv *e, uint64_t a, unsigned w, int *res) {
+     return v;
+ }
+ static void mem_write(const CheatEnv *e, uint64_t a, unsigned w, uint64_t v, int *res) {
+-    if (!e->writable || !e->writable(a, w)) { *res |= CHEAT_WRITE_BLOCKED; return; }
++    if (!e->writable || !e->writable(a, w)) {
++        if (!(e->code_write && e->code_write(a, &v, w))) *res |= CHEAT_WRITE_BLOCKED;  // (a code cheat's variant: taken)
++        return;
++    }
+     memcpy((void *)(uintptr_t)a, &v, w);
+ }
+ static uint64_t base_of(const CheatEnv *e, unsigned m) { return m < 4 ? e->base[m] : 0; }
+@@ -366,6 +369,81 @@ bool cheat_patches_code(const Cheat *c, uint64_t code_lo, uint64_t code_hi) {
+     return false;
+ }
+ 
++int cheats_code_variants(const CheatList *l, uint64_t code_lo, uint64_t code_hi, CheatVariant *out, int max) {
++    int n = 0;
++    for (int i = 0; i < l->n; i++) {
++        const Cheat *c = &l->c[i];
++        for (int pc = 0; pc < c->nop;) {
++            int len = op_len(c->op, c->nop, pc);
++            if (len == 0) break;
++            uint32_t f = c->op[pc];
++            unsigned w = (f >> 24) & 0xF, m = (f >> 20) & 0xF, r = (f >> 16) & 0xF;
++            if (f >> 28 == 0 && m == CHEAT_MAIN && r == 0 && (w == 4 || w == 8)) {  // (a fixed write, no offset register)
++                uint64_t a = (uint64_t)(f & 0xFF) << 32 | c->op[pc + 1];
++                uint64_t v = w == 8 ? (uint64_t)c->op[pc + 2] << 32 | c->op[pc + 3] : c->op[pc + 2];
++                for (unsigned k = 0; k < w / 4; k++) {
++                    uint64_t off = a + 4 * k;
++                    uint32_t word = (uint32_t)(v >> (32 * k));
++                    if (off < code_lo || off >= code_hi || (off & 3)) continue;
++                    bool seen = false;
++                    for (int j = 0; j < n && !seen; j++) seen = out[j].off == off && out[j].word == word;
++                    if (!seen && n < max) out[n++] = (CheatVariant){off, word};
++                }
++            }
++            pc += len;
++        }
++    }
++    return n;
++}
++
++// ---- the variants compiled into the running game code: an open-addressed table by address
++#define CODE_SITES 4096
++#define CODE_WORDS 8  // (variants at one address, at most)
++static struct {
++    uint64_t addr;
++    int n;
++    uint32_t word[CODE_WORDS];
++    uint32_t on;  // (atomic: the cheat VM writes it, the game's threads read it - rando_word)
++} g_code[CODE_SITES];
++static unsigned site_slot(uint64_t a) { return (unsigned)((a >> 2) * 0x9E3779B1u) & (CODE_SITES - 1); }
++static int site_find(uint64_t a, bool make) {
++    for (unsigned s = site_slot(a), k = 0; k < CODE_SITES; k++, s = (s + 1) & (CODE_SITES - 1)) {
++        if (g_code[s].addr == a) return (int)s;
++        if (!g_code[s].addr) {
++            if (!make) return -1;
++            g_code[s].addr = a, g_code[s].n = 0, g_code[s].on = CHEAT_CODE_ORIGINAL;
++            return (int)s;
++        }
++    }
++    return -1;
++}
++void cheat_code_reset(void) { memset(g_code, 0, sizeof g_code); }
++bool cheat_code_add(uint64_t a, uint32_t word) {
++    if (!a || (a & 3)) return false;
++    int s = site_find(a, true);
++    if (s < 0) return false;
++    for (int i = 0; i < g_code[s].n; i++) if (g_code[s].word[i] == word) return true;
++    if (g_code[s].n == CODE_WORDS) return false;
++    g_code[s].word[g_code[s].n++] = word;
++    return true;
++}
++bool cheat_code_write(uint64_t a, const void *v, unsigned n) {
++    if ((a & 3) || !n || (n & 3) || n > 8) return false;
++    int site[2];
++    for (unsigned k = 0; k < n / 4; k++) if ((site[k] = site_find(a + 4 * k, false)) < 0) return false;
++    for (unsigned k = 0; k < n / 4; k++) {
++        uint32_t w, on = CHEAT_CODE_ORIGINAL;  // (a word that isn't compiled in - the original, restored: the game's)
++        memcpy(&w, (const uint8_t *)v + 4 * k, 4);
++        for (int i = 0; i < g_code[site[k]].n; i++) if (g_code[site[k]].word[i] == w) on = w;
++        __atomic_store_n(&g_code[site[k]].on, on, __ATOMIC_RELAXED);
++    }
++    return true;
++}
++uint32_t cheat_code_word(uint64_t a) {
++    int s = site_find(a, false);
++    return s < 0 ? CHEAT_CODE_ORIGINAL : __atomic_load_n(&g_code[s].on, __ATOMIC_RELAXED);
++}
++
+ // ---- the player's cheat files
+ static char *slurp(const char *path, size_t *n) {
+     FILE *f = fopen(path, "rb");
+@@ -438,6 +516,67 @@ static bool is_build_id_name(const char *base, size_t len) {  // "0123456789ABCD
+     return true;
+ }
+ 
++bool cheats_main_code(const char *exefs, uint64_t *lo, uint64_t *hi) {  // (NSO header: text memory offset +0x14, size +0x18)
++    char p[PATH_MAX];
++    snprintf(p, sizeof p, "%s/main", exefs);
++    FILE *f = fopen(p, "rb");
++    if (!f) return false;
++    uint8_t h[0x1C];
++    bool ok = fread(h, 1, sizeof h, f) == sizeof h && !memcmp(h, "NSO0", 4);
++    fclose(f);
++    if (!ok) return false;
++    uint32_t off, size;
++    memcpy(&off, h + 0x14, 4), memcpy(&size, h + 0x18, 4);
++    *lo = off, *hi = (uint64_t)off + size;
++    return true;
++}
++
++bool cheats_variants_path(const char *exefs, char *out, size_t n) { return cheat_path(exefs, ".variants.json", out, n, false); }
++
++static bool write_variants(const char *exefs, const char *text) {
++    CheatList l;
++    uint64_t lo = 0, hi = 0;
++    char p[PATH_MAX];
++    if (!cheat_path(exefs, ".variants.json", p, sizeof p, true)) return false;
++    enum { MAXV = 4096 };
++    CheatVariant *v = malloc(MAXV * sizeof *v);
++    int n = 0;
++    if (v && cheats_main_code(exefs, &lo, &hi) && cheats_parse(text, &l)) n = cheats_code_variants(&l, lo, hi, v, MAXV), cheats_free(&l);
++    if (n == 0) {  // (no code cheats: no list - nothing for the game code to be rebuilt for)
++        free(v);
++        return remove(p) == 0 || errno == ENOENT;
++    }
++    size_t cap = 64 + (size_t)n * 40, k = 0;
++    char *j = malloc(cap);
++    if (!j) { free(v); return false; }
++    k += (size_t)snprintf(j + k, cap - k, "{\"code\": {");
++    for (int i = 0; i < n; i++) {
++        bool first = true;
++        for (int q = 0; q < i && first; q++) first = v[q].off != v[i].off;  // (each address once, with all its words)
++        if (!first) continue;
++        k += (size_t)snprintf(j + k, cap - k, "%s\"0x%llx\": [", k > 10 ? ", " : "", (unsigned long long)v[i].off);
++        for (int q = i, m = 0; q < n; q++)
++            if (v[q].off == v[i].off) k += (size_t)snprintf(j + k, cap - k, "%s\"0x%08x\"", m++ ? ", " : "", v[q].word);
++        k += (size_t)snprintf(j + k, cap - k, "]");
++    }
++    k += (size_t)snprintf(j + k, cap - k, "}}\n");
++    bool ok = write_atomic(p, j, k);
++    free(j), free(v);
++    return ok;
++}
++
++bool cheats_variants_hash(const char *exefs, char out[17]) {
++    char p[PATH_MAX];
++    size_t n;
++    char *d = cheats_variants_path(exefs, p, sizeof p) ? slurp(p, &n) : NULL;
++    if (!d) return false;
++    uint64_t h = 0xcbf29ce484222325ull;
++    for (size_t i = 0; i < n; i++) h = (h ^ (uint8_t)d[i]) * 0x100000001b3ull;
++    free(d);
++    snprintf(out, 17, "%016llx", (unsigned long long)h);
++    return true;
++}
++
+ bool cheats_import(const char *path, const char *exefs, char *why, size_t why_size) {
+     char bid[17], dst[PATH_MAX];
+     if (why_size) why[0] = 0;
+@@ -494,6 +633,7 @@ bool cheats_import(const char *path, const char *exefs, char *why, size_t why_si
+     cheats_free(&l);
+     bool ok = cheat_path(exefs, ".txt", dst, sizeof dst, true) && write_atomic(dst, text, strlen(text));
+     if (!ok) snprintf(why, why_size, "Couldn't save the cheats in the data folder.");
++    if (ok && !write_variants(exefs, text)) ok = false, snprintf(why, why_size, "Couldn't save the code cheats' list in the data folder.");
+     free(text);
+     return ok;
+ }
+@@ -562,3 +702,47 @@ bool cheats_any_on(const char *exefs) {
+     free(t);
+     return any;
+ }
++
++int cheats_code_load(const char *exefs, const char *list_path, uint64_t main_base) {
++    cheat_code_reset();
++    char want[17];
++    FILE *f = fopen(list_path, "r");
++    if (!f) return -1;
++    char have[64] = "";
++    int n = 0;
++    if (fscanf(f, "hash %63s", have) != 1 || !cheats_variants_hash(exefs, want) || strcmp(have, want)) n = -1;
++    unsigned long long off;
++    unsigned word;
++    while (n >= 0 && fscanf(f, " %llx %x", &off, &word) == 2)
++        if (cheat_code_add(main_base + off, (uint32_t)word)) n++;
++    fclose(f);
++    return n;
++}
++
++bool cheat_code_supported(const Cheat *c, uint64_t main_base, uint64_t code_lo, uint64_t code_hi) {
++    CheatList one = {(Cheat *)c, 1};
++    CheatVariant v[64];
++    int n = cheats_code_variants(&one, code_lo, code_hi, v, 64);
++    for (int i = 0; i < n; i++) {
++        int s = site_find(main_base + v[i].off, false);
++        if (s < 0) return false;
++        bool have = false;
++        for (int k = 0; k < g_code[s].n && !have; k++) have = g_code[s].word[k] == v[i].word;
++        if (!have) return false;
++    }
++    return true;
++}
++
++bool cheats_prepare(const char *exefs) {
++    char txt[PATH_MAX], var[PATH_MAX];
++    struct stat t, v;
++    if (!cheat_path(exefs, ".txt", txt, sizeof txt, false) || stat(txt, &t) != 0) return true;  // (no cheats: nothing to do)
++    if (cheats_variants_path(exefs, var, sizeof var) && stat(var, &v) == 0 &&
++        v.st_mtime >= t.st_mtime)  // (st_mtime: Windows' C runtime has no nanoseconds)
++        return true;  // (up to date)
++    char *text = slurp(txt, NULL);
++    if (!text) return false;
++    bool ok = write_variants(exefs, text);
++    free(text);
++    return ok;
++}
+diff --git a/runtime/cheats.h b/runtime/cheats.h
+index 5cfa7fa..7a29afa 100644
+--- a/runtime/cheats.h
++++ b/runtime/cheats.h
+@@ -34,6 +34,9 @@ typedef struct {
+     uint64_t keys;  // the buttons held, in HID bit order (A = 1 << 0, B = 1 << 1, ... ZL = 1 << 8, ...)
+     bool (*readable)(uint64_t addr, uint64_t n);
+     bool (*writable)(uint64_t addr, uint64_t n);
++    // a write the VM can't make to memory (main's code): true when it was taken instead - a code cheat's variant
++    // switched on (patches/0010). NULL: refused, as any other.
++    bool (*code_write)(uint64_t addr, const void *v, unsigned n);
+ } CheatEnv;
+ 
+ typedef struct {
+@@ -69,3 +72,34 @@ bool cheats_is_on(const char *exefs, const char *name);
+ void cheats_set_on(const char *exefs, const char *name, bool on);
+ void cheats_all_off(const char *exefs);
+ bool cheats_any_on(const char *exefs);
++
++// ---- code cheats (patches/0010). The game's code is recompiled, so a cheat that rewrites an instruction can't change
++// it in memory. Instead every fixed instruction write in the imported file (any cheat, on or off) is a *variant*: the
++// generator compiles it next to the original instruction (tools/gen.py --code-variants, which picks the word on at run
++// time with rando_word), and the cheat VM's write into main's code switches that variant on (cheat_code_write).
++typedef struct {
++    uint64_t off;   // from main's base
++    uint32_t word;  // the instruction written there
++} CheatVariant;
++#define CHEAT_CODE_ORIGINAL 0xFFFFFFFFu  // (cheat_code_word: no variant on - the game's own instruction)
++// main's code (its NSO text segment) as offsets from its base
++bool cheats_main_code(const char *exefs, uint64_t *lo, uint64_t *hi);
++// every distinct (offset, word) a cheat writes into [code_lo, code_hi) at a fixed address, 4 or 8 bytes at a time
++int cheats_code_variants(const CheatList *l, uint64_t code_lo, uint64_t code_hi, CheatVariant *out, int max);
++// <data>/cheats/<build id>.variants.json (written by cheats_import): {"code": {"0x<off>": ["0x<word>", ...]}}
++bool cheats_variants_path(const char *exefs, char *out, size_t n);
++bool cheats_variants_hash(const char *exefs, char out[17]);  // of that file (FNV-1a 64, hex); false: none
++// the variants compiled into the running game code, and which one is on at each address (guest addresses)
++void cheat_code_reset(void);
++bool cheat_code_add(uint64_t addr, uint32_t word);
++bool cheat_code_write(uint64_t addr, const void *v, unsigned n);  // false: not all of it is a variant site
++uint32_t cheat_code_word(uint64_t addr);                          // the word on there, or CHEAT_CODE_ORIGINAL
++// The list the game code was built with (runtime/gamebuild.c: <game dir>/lasgame.so.variants - "hash <h>", then
++// "0x<off> 0x<word>" lines): into the table at main_base + off, if <h> is this cheat file's variants hash. Returns
++// the variants loaded, -1 when the list is missing or for another cheat file (the table then empty).
++int cheats_code_load(const char *exefs, const char *list_path, uint64_t main_base);
++// every instruction the cheat writes into main's code [code_lo, code_hi) is compiled in (a cheat with none: true)
++bool cheat_code_supported(const Cheat *c, uint64_t main_base, uint64_t code_lo, uint64_t code_hi);
++// The variants list made again when the cheat file is newer than it (or it is missing): a cheat file copied into
++// <data>/cheats by hand or by the AppImage (its bundled one) gets its code cheats too. false: couldn't write it.
++bool cheats_prepare(const char *exefs);
+diff --git a/runtime/gamebuild.c b/runtime/gamebuild.c
+index 2d6dc0e..aecf502 100644
+--- a/runtime/gamebuild.c
++++ b/runtime/gamebuild.c
+@@ -1,6 +1,8 @@
+ // Builds the game code library on the player's machine (runtime/gamebuild.h).
+ #include "gamebuild.h"
+ 
++#include "cheats.h"
++
+ #include <pthread.h>
+ #include <stdint.h>
+ #include <stdio.h>
+@@ -300,7 +302,15 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
+     rt_remove_game_file(game_dir, ".gamebuild");
+     rt_remove_game_file(game_dir, GAMELIB_NAME);
+     rt_remove_game_file(game_dir, GAMELIB_NAME ".id");
++    rt_remove_game_file(game_dir, GAMELIB_NAME ".variants");
+     mkdir(work, 0755);
++    // the code cheats (patches/0010): the imported cheat file's instruction writes, compiled in as variants
++    char exefs_dir[1100], vpath[1100], vhash[17] = "none";
++    snprintf(exefs_dir, sizeof exefs_dir, "%s" SEP "exefs", game_dir);
++    if (!cheats_prepare(exefs_dir)) LOG("[gamebuild] code cheats: their list couldn't be made\n");
++    bool variants = cheats_variants_path(exefs_dir, vpath, sizeof vpath) && file_exists(vpath) &&
++                    cheats_variants_hash(exefs_dir, vhash);
++    if (variants) LOG("[gamebuild] code cheats: %s (%s)\n", vpath, vhash);
+     if (t.zig) {  // its caches in the work folder too (deleted below), not ~/.cache: hundreds of MB, used once
+         char zc[1200];
+         snprintf(zc, sizeof zc, "%s" SEP "zig-cache", work);
+@@ -339,6 +349,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
+         add(&a, base[i]);
+         add(&a, g->out);
+         if (i == 1) { add(&a, "--hle"); add(&a, t.hle); }
++        if (i == 0 && variants) { add(&a, "--code-variants"); add(&a, vpath); }
+         g->p = spawn(a.v, g->log);
+         args_free(&a);
+         if (!g->p) { snprintf(why, why_size, "the game code builder didn't start"); ok = false; }
+@@ -509,6 +520,19 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
+             ok = false;
+         }
+         if (f) fclose(f);
++        // which code cheats it was built with: their hash, then what the generator compiled in (gen.py's list)
++        char vl[1100], vok[1100];
++        snprintf(vl, sizeof vl, "%s.variants", lib);
++        snprintf(vok, sizeof vok, "%s" SEP "main" SEP "code_variants_ok.txt", work);
++        FILE *o = ok ? fopen(vl, "wb") : NULL, *in = variants ? fopen(vok, "rb") : NULL;
++        if (o) {
++            fprintf(o, "hash %s\n", variants ? vhash : "none");
++            char buf[4096];
++            size_t k;
++            while (in && (k = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, k, o);
++            fclose(o);
++        }
++        if (in) fclose(in);
+     }
+     free(units.u);
+     rt_remove_game_file(game_dir, ".gamebuild");  // the C, the objects, the logs
+diff --git a/runtime/gamesetup.c b/runtime/gamesetup.c
+index db718e4..60a15f8 100644
+--- a/runtime/gamesetup.c
++++ b/runtime/gamesetup.c
+@@ -16,6 +16,7 @@
+ #include <string.h>
+ #include <sys/stat.h>
+ 
++#include "cheats.h"
+ #include "gamebuild.h"
+ #include "gamelib.h"
+ #include "hle.h"
+@@ -133,8 +134,21 @@ bool setup_ready(void) {
+     return game_ok(ROOT "/exefs") && is_file(ROOT "/romfs.bin") && gamelib_present(ROOT);
+ }
+ 
++// The code cheats the game code was built with (runtime/gamebuild.c: lasgame.so.variants' hash) are the imported
++// cheat file's (patches/0010): "none" for both when there are none
++static bool code_cheats_built(void) {
++    char want[17] = "none", have[64] = "none";
++    if (!cheats_variants_hash(ROOT "/exefs", want)) snprintf(want, sizeof want, "none");
++    FILE *f = fopen(ROOT "/" GAMELIB_NAME ".variants", "r");
++    if (f) {
++        if (fscanf(f, "hash %63s", have) != 1) snprintf(have, sizeof have, "?");
++        fclose(f);
++    }
++    return !strcmp(want, have);
++}
++
+ bool setup_needs_code(void) {
+-    return game_ok(ROOT "/exefs") && is_file(ROOT "/romfs.bin") && !gamelib_present(ROOT);
++    return game_ok(ROOT "/exefs") && is_file(ROOT "/romfs.bin") && (!gamelib_present(ROOT) || !code_cheats_built());
+ }
+ 
+ typedef struct { char exefs[1024], romfs[1024], romfs_bin[1024]; bool package; } Found;
+diff --git a/runtime/hle/cheats_rt.c b/runtime/hle/cheats_rt.c
+index e497451..171c315 100644
+--- a/runtime/hle/cheats_rt.c
++++ b/runtime/hle/cheats_rt.c
+@@ -11,6 +11,7 @@
+ #include <string.h>
+ 
+ #include "../cheats.h"
++#include "../gamelib.h"
+ #include "../hle.h"
+ #include "../kernel.h"
+ #include "../rt.h"
+@@ -38,7 +39,11 @@ static bool rt_writable(uint64_t a, uint64_t n) {
+     return true;
+ }
+ 
++// The code cheats' variant picked at a patched instruction (the generated code asks: tools/gen.py --code-variants)
++uint32_t rando_word(uint64_t addr) { return cheat_code_word(addr); }
++
+ void cheats_rt_load(const char *exefs) {
++    cheat_code_reset();
+     free(g_prog);
+     g_prog = NULL, g_nprog = g_on_count = g_reported = 0;
+     memset(&g_st, 0, sizeof g_st);
+@@ -47,6 +52,13 @@ void cheats_rt_load(const char *exefs) {
+     CheatList l;
+     if (cheats_load(exefs, &l) <= 0) return;
+     uint64_t text = g_nmodules ? g_modules[0].text_off : 0, text_n = g_nmodules ? g_modules[0].text_size : 0;
++    uint64_t main_base = g_nmodules ? g_modules[0].base : MAIN_BASE;
++    char list[1100];  // (the code cheats compiled into the game code: <game dir>/lasgame.so.variants, runtime/gamebuild.c)
++    snprintf(list, sizeof list, "%s", exefs);
++    char *sl = strrchr(list, '/');
++    snprintf(sl ? sl + 1 : list, sizeof list - (size_t)(sl ? sl + 1 - list : 0), GAMELIB_NAME ".variants");
++    int nv = cheats_code_load(exefs, list, main_base);
++    if (nv > 0) LOG("[cheats] %d code-cheat variants compiled into the game code\n", nv);
+     bool *take = calloc((size_t)l.n, sizeof *take);
+     int master = -1, total = 0;
+     for (int i = 0; take && i < l.n; i++) {
+@@ -54,8 +66,8 @@ void cheats_rt_load(const char *exefs) {
+         if (!c->nop) continue;
+         if (c->master) { if (master < 0) master = i, take[i] = true, total += c->nop; continue; }
+         if (!cheats_is_on(exefs, c->name)) continue;
+-        if (cheat_patches_code(c, text, text + text_n)) {
+-            LOG("[cheats] \"%s\" patches the game's code: it can't work in a recompilation, skipped\n", c->name);
++        if (cheat_patches_code(c, text, text + text_n) && !cheat_code_supported(c, main_base, text, text + text_n)) {
++            LOG("[cheats] \"%s\" changes the game's code, and the game code wasn't built with it: skipped\n", c->name);
+             continue;
+         }
+         take[i] = true, total += c->nop, g_on_count++;
+@@ -79,6 +91,7 @@ void cheats_frame(void) {
+         .keys = input_buttons_now(),
+         .readable = rt_readable,
+         .writable = rt_writable,
++        .code_write = cheat_code_write,  // (a code cheat: its compiled-in variant switched on)
+     };
+     int r = cheat_vm_run(g_prog, g_nprog, &env, &g_st);
+     int bad = r & (CHEAT_BAD_OPCODE | CHEAT_TOO_LONG | CHEAT_WRITE_BLOCKED) & ~g_reported;
+diff --git a/runtime/paths.c b/runtime/paths.c
+index c5938cd..7f3f422 100644
+--- a/runtime/paths.c
++++ b/runtime/paths.c
+@@ -142,7 +142,7 @@ bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n) {
+ // ---- game files
+ // What the setup (runtime/ui/launcher.mm) creates in extracted/, plus what older versions' extraction and manual
+ // extractions left there (never read at run time).
+-static const char *const GAME_FILES[] = {"exefs", "romfs", "romfs.bin", GAMELIB_NAME, GAMELIB_NAME ".id", ".gamebuild",
++static const char *const GAME_FILES[] = {"exefs", "romfs", "romfs.bin", GAMELIB_NAME, GAMELIB_NAME ".id", GAMELIB_NAME ".variants", ".gamebuild",
+                                          ".extract", "extract.log", "xci_secure", "nso_raw", "update_pfs", ".DS_Store"};
+ 
+ // game_dir must be <data root>/extracted, a real folder (a dev worktree's symlinked extracted/ is refused)
+diff --git a/runtime/ui/launcher_lg.mm b/runtime/ui/launcher_lg.mm
+index 15c87f4..1f895d9 100644
+--- a/runtime/ui/launcher_lg.mm
++++ b/runtime/ui/launcher_lg.mm
+@@ -35,6 +35,7 @@
+ extern "C" void vk_describe_gpu(char *name, size_t n, int *vram_gb, bool *integrated);  // nvn/vulkan/device.c
+ extern "C" {
+ #include "cheats.h"
++#include "gamelib.h"
+ #include "gamesetup.h"
+ #include "input_bind.h"
+ #include "mods.h"
+@@ -508,27 +509,12 @@ static void SDLCALL picked_cheat(void *, const char *const *files, int) {
+     snprintf(g_pick_cheat, sizeof g_pick_cheat, "%s", files[0]);
+     pthread_mutex_unlock(&g_pick_lock);
+ }
+-// main's code, as offsets from its base: the NSO header's text segment (memory offset +0x14, size +0x18)
+-static bool main_text(const char *exefs, uint64_t *lo, uint64_t *hi) {
+-    char p[1100];
+-    snprintf(p, sizeof p, "%s/main", exefs);
+-    FILE *f = fopen(p, "rb");
+-    if (!f) return false;
+-    uint8_t h[0x1C];
+-    bool ok = fread(h, 1, sizeof h, f) == sizeof h && !memcmp(h, "NSO0", 4);
+-    fclose(f);
+-    if (!ok) return false;
+-    uint32_t off, size;
+-    memcpy(&off, h + 0x14, 4), memcpy(&size, h + 0x18, 4);
+-    *lo = off, *hi = (uint64_t)off + size;
+-    return true;
+-}
+ static void cheats_section(SDL_Window *win) {
+     static const SDL_DialogFileFilter filters[] = {{"Cheats (.txt, .zip)", "txt;zip"}, {"All files", "*"}};
+     static const char *const ex = "extracted/exefs";
+     static CheatList list;
+-    static std::vector<char> on, code;  // (per cheat: on; patches the game's code)
+-    static bool stale = true, msg_bad;
++    static std::vector<char> on, code, ready;  // (per cheat: on; patches the game's code; that code is compiled in)
++    static bool stale = true, msg_bad, built;  // (built: the game code has this cheat file's code cheats - patches/0010)
+     static char msg[320];
+     char bid[17], picked[1024];
+     bool have_game = cheats_build_id(ex, bid);
+@@ -549,13 +535,19 @@ static void cheats_section(SDL_Window *win) {
+         cheats_free(&list);
+         on.clear(), code.clear();
+         uint64_t lo = 0, hi = 0;
+-        bool text = have_game && main_text(ex, &lo, &hi);
++        bool text = have_game && cheats_main_code(ex, &lo, &hi);
++        built = have_game && cheats_code_load(ex, "extracted/" GAMELIB_NAME ".variants", 0) >= 0;
++        ready.clear();
+         if (have_game && cheats_load(ex, &list) > 0)
+             for (int i = 0; i < list.n; i++) {
+                 on.push_back(cheats_is_on(ex, list.c[i].name));
+                 code.push_back(text && cheat_patches_code(&list.c[i], lo, hi));
++                ready.push_back(built && cheat_code_supported(&list.c[i], 0, lo, hi));
+             }
+     }
++    static bool was_running;  // (a rebuild just ended: what's compiled in is read again)
++    if (was_running && !setup_running()) stale = true;
++    was_running = setup_running();
+     ImGui::TextWrapped("%s", T("Atmosphère cheat files for Legends: Arceus 1.1.1: the <build id>.txt from a cheat site, or a cheat "
+                                "database's .zip (the file for this version is taken from it). Cheats that are on run while you play, "
+                                "from the game's next start. Back up your save before using cheats.",
+@@ -590,6 +582,22 @@ static void cheats_section(SDL_Window *win) {
+         ImGui::TextDisabled("%s", T("No cheats yet.", "Nenhum cheat ainda."));
+         return;
+     }
++    bool any_code_waiting = false;
++    for (int i = 0; i < list.n; i++) any_code_waiting |= code[i] && !built;
++    if (any_code_waiting) {  // (code cheats are compiled into the game code: once per cheat file, then they toggle freely)
++        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 900);
++        ImGui::TextColored(k_yellow, "%s", T("Cheats that change the game's code need the game code rebuilt with them, once for this cheat file "
++                                             "(about as long as setting the game up). After that they can be turned on and off freely.",
++                                             "Cheats que mudam o código do jogo precisam do código do jogo recompilado com eles, uma vez para "
++                                             "este arquivo de cheats (mais ou menos o tempo de preparar o jogo). Depois disso eles ligam e "
++                                             "desligam à vontade."));
++        ImGui::PopTextWrapPos();
++        if (setup_running())
++            ImGui::TextDisabled("%s", T("Rebuilding the game code... (Game Files shows how far it is)", "Recompilando o código do jogo... (Arquivos do jogo mostra o progresso)"));
++        else if (ImGui::Button(T("Rebuild the game code with these cheats", "Recompilar o código do jogo com estes cheats")))
++            setup_start(NULL);
++        ImGui::Spacing();
++    }
+     for (int i = 0; i < list.n; i++) {
+         const Cheat *c = &list.c[i];
+         ImGui::PushID(i);
+@@ -599,18 +607,22 @@ static void cheats_section(SDL_Window *win) {
+             ImGui::Spacing();
+             ImGui::TextColored(ImVec4(0.94f, 0.77f, 0.36f, 1), "%s", c->name);  // (a section label, or an empty cheat)
+         } else {
+-            bool v = on[i] != 0;
+-            ImGui::BeginDisabled(code[i] != 0);
++            bool v = on[i] != 0, waiting = code[i] && !ready[i];
++            ImGui::BeginDisabled(waiting);
+             if (ImGui::Checkbox(c->name, &v)) cheats_set_on(ex, c->name, v), on[i] = v;
+             ImGui::EndDisabled();
+-            if (code[i]) {
++            if (waiting) {
+                 ImGui::SameLine();
+-                ImGui::TextDisabled("%s", T("(changes the game's code: can't work here)", "(muda o código do jogo: não funciona aqui)"));
+-                if (ImGui::IsItemHovered())
+-                    ImGui::SetTooltip("%s", T("This game is recompiled for your PC, so its code no longer runs from memory: a cheat "
+-                                              "that rewrites instructions has nothing to change. Cheats that change values work.",
+-                                              "Este jogo é recompilado para o seu PC, então o código dele não roda mais da memória: "
+-                                              "um cheat que reescreve instruções não tem o que mudar. Cheats que mudam valores funcionam."));
++                if (!built)
++                    ImGui::TextDisabled("%s", T("(changes the game's code: rebuild the game code first)", "(muda o código do jogo: recompile o código do jogo antes)"));
++                else {
++                    ImGui::TextDisabled("%s", T("(changes the game's code in a way that can't be recompiled)", "(muda o código do jogo de um jeito que não dá para recompilar)"));
++                    if (ImGui::IsItemHovered())
++                        ImGui::SetTooltip("%s", T("This game is recompiled for your PC: a cheat that rewrites instructions works when its new "
++                                                  "instructions are compiled in too. The recompiler couldn't translate this one's (lasrecomp.log says which).",
++                                                  "Este jogo é recompilado para o seu PC: um cheat que reescreve instruções funciona quando as instruções "
++                                                  "novas também são compiladas. O recompilador não conseguiu traduzir as deste (o lasrecomp.log diz quais)."));
++                }
+             }
+         }
+         ImGui::PopID();
+@@ -1203,7 +1215,7 @@ extern "C" void launcher_lg_run(const char *root) {
+     if (getenv("LARECOMP_SETUP_DIR")) g_setup_from_folder = true, setup_start(getenv("LARECOMP_SETUP_DIR"));
+     // (game files set up, but no game code built by this version - a new AppImage whose generator changed, or a
+     // recompile that was interrupted after the files were written: the code alone is built again, as at setup)
+-    else if (setup_needs_code()) {
++    else if (cheats_prepare("extracted/exefs"), setup_needs_code()) {  // (a cheat file copied in: its code cheats listed first)
+         fprintf(stderr, "[launcher] the game code needs building again (game files set up already): rebuilding\n");
+         g_setup_from_folder = false, setup_start(NULL);
+     }
+diff --git a/tools/gen.py b/tools/gen.py
+index 7e981e5..84e507c 100644
+--- a/tools/gen.py
++++ b/tools/gen.py
+@@ -760,6 +760,39 @@ if _os.path.exists(_rv):
+         RANDO_CODE[int(_a, 16)] = [int(_w, 16) for _w in _ws]
+ 
+ 
++def load_code_variants(m, path):
++    """The code cheats' instruction words (--code-variants) into RANDO_CODE, each one checked first: an address outside
++    the module's code or a word the lifter can't translate is left out (and said), so one odd cheat can't stop the
++    game code from being built. Returns the (offset, word) pairs kept."""
++    kept, skipped = [], 0
++    try:
++        code = _json.load(open(path))['code']
++    except (OSError, ValueError, KeyError) as e:
++        print(f'{m.name}: code variants: {path} unreadable ({e}): none', file=sys.stderr)
++        return kept
++    for off_s, words in code.items():
++        off = int(off_s, 16)
++        a = m.base + off
++        if not (m.lo <= a < m.hi) or a % 4:
++            skipped += len(words)
++            continue
++        ok = []
++        for w_s in words:
++            w = int(w_s, 16)
++            try:
++                m.lifter.lift(w, a)
++            except Exception as e:  # (Unsupported, or a decode the lifter doesn't expect)
++                print(f'{m.name}: code variant {a:#x} = {w:#010x} left out: {e}', file=sys.stderr)
++                skipped += 1
++                continue
++            ok.append(w)
++            kept.append((off, w))
++        if ok:
++            RANDO_CODE[off] = ok
++    print(f'{m.name}: {len(kept)} code variants at {len(RANDO_CODE)} addresses, {skipped} left out', file=sys.stderr)
++    return kept
++
++
+ def write_if_changed(path, text):
+     """Leaves unchanged chunks untouched so make only recompiles what a patch affected."""
+     try:
+@@ -784,6 +817,9 @@ def main():
+     ap.add_argument('--big-fn', type=int, default=100000)  # bytes of C from which a function gets its own file
+     ap.add_argument('--limit', type=int, default=0)
+     ap.add_argument('--no-promote', action='store_true')  # guest registers stay in the Cpu struct (promote_registers)
++    # code cheats (the AppImage's patches/0010): {"code": {"0x<off>": ["0x<word>", ...]}} - each word compiled next to
++    # the instruction at main + off, picked at run time by rando_word (the runtime's cheats, hle/cheats_rt.c)
++    ap.add_argument('--code-variants')
+     ap.add_argument('--trace-stores', action='store_true')  # research build (letsgo-recomp's docs/DEPURACAO.md, LARECOMP_TRACE_STORES)
+     ap.add_argument('--simd', choices=('asm', 'c'),
+                     default='asm' if platform.machine().lower() in ('arm64', 'aarch64') else 'c')
+@@ -801,6 +837,7 @@ def main():
+         PATCHES.clear()
+         PATCHES.update(moved)
+         RANDO_CODE.clear()
++    code_ok = load_code_variants(m, args.code_variants) if args.name == 'main' and args.code_variants else None
+     starts = m.boundaries()
+     hle = {}
+     if args.hle and os.path.exists(args.hle):
+@@ -938,6 +975,8 @@ def main():
+         f.write('};\n')
+         f.write(f'const uint64_t {args.name}_fn_count = {len(order)};\n')
+         write_if_changed(os.path.join(args.outdir, f'{args.name}_table.c'), f.getvalue())
++    if code_ok is not None:  # (what was compiled in: the runtime enables only these - runtime/gamebuild.c keeps the list)
++        write_if_changed(os.path.join(args.outdir, 'code_variants_ok.txt'), ''.join(f'0x{o:x} 0x{w:08x}\n' for o, w in code_ok))
+     print(f'{args.name}: wrote {nchunks} chunks, {time.time() - t0:.0f}s total', file=sys.stderr)
+ 
+ 
+-- 
+2.56.0
+

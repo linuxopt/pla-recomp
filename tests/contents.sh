@@ -15,6 +15,7 @@ for f in AppRun lasrecomp plarecomp.desktop plarecomp.png .DirIcon icon.png Balo
          gamelib-src/hle_symbols.txt gamelib-src/pgo.profdata \
          plugins/liblegendslua.so plugins/libsteamrelay.so plugins/steamrelay-helper \
          "mods/Lush Foliage/mod.ini" "mods/Lush Foliage/trees.lft" lua-examples/pla_research.lua \
+         cheats/AEE8F150DDA1B5A8.txt cheats/CREDITS.txt \
          licenses/LICENSE.txt licenses/SDL3-LICENSE.txt licenses/zig-LICENSE.txt licenses/Python-LICENSE.txt; do
     [ -e "$R/$f" ] || { echo "contents: MISSING $f"; fail=1; }
 done

@@ -23,6 +23,11 @@ if mkdir -p "$D/plugins" "$D/mods" "$D/lua-examples" 2>/dev/null; then
         n=$(basename "$m")
         [ -e "$D/mods/$n" ] || cp -R "$m" "$D/mods/$n"
     done
+    # the bundled cheats: copied only when the player has no cheat file of their own (an import is never replaced)
+    mkdir -p "$D/cheats" 2>/dev/null
+    for f in "$HERE"/cheats/*; do
+        [ -f "$f" ] && [ ! -e "$D/cheats/$(basename "$f")" ] && cp "$f" "$D/cheats/"
+    done
     for f in "$HERE"/lua-examples/*; do
         [ -f "$f" ] && [ ! -e "$D/lua-examples/$(basename "$f")" ] && cp "$f" "$D/lua-examples/"
     done

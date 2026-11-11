@@ -10,6 +10,8 @@
 #include "gamesetup.h"
 #include "nxpkg.h"
 #include "settings.h"
+#include "cheats.h"
+#define ROOT_EXEFS "extracted/exefs"
 
 static int g_run, g_fail;
 #define CHECK(cond)                                                              \
@@ -229,12 +231,33 @@ static int needs_code_nothing(void) {
     return ok;
 }
 
+// ---- patch 0010: the game code is built again when the imported code cheats change
+static int needs_code_cheats(void) {
+    int ok = 1;
+    set_up_game_files();
+    g_stub_gamelib_present = true;
+    CHECK(!setup_needs_code());  // (no cheats, no list: as built)
+    mkdir("cheats", 0755);
+    write_file("cheats/AEE8F150DDA1B5A8.variants.json", "{\"code\": {\"0x1000\": [\"0x52800c80\"]}}\n", 37);
+    CHECK(setup_needs_code());   // (cheats imported, the game code built without them)
+    write_file("extracted/lasgame.so.variants", "hash 0000000000000000\n", 22);
+    CHECK(setup_needs_code());   // (built for another cheat file)
+    char h[17];
+    CHECK(cheats_variants_hash(ROOT_EXEFS, h));
+    char line[64];
+    snprintf(line, sizeof line, "hash %s\n0x1000 0x52800c80\n", h);
+    write_file("extracted/lasgame.so.variants", line, strlen(line));
+    CHECK(!setup_needs_code());  // (built with them)
+    return ok;
+}
+
 int main(void) {
     struct { const char *name; int (*fn)(void); } tests[] = {
         {"no_keys", no_keys}, {"no_game", no_game}, {"files_spaces", files_spaces}, {"files_order", files_order},
         {"default_none", default_none}, {"default_switch", default_switch},
         {"pla111_yes", pla111_yes}, {"pla111_other_build", pla111_other_build}, {"settings_roundtrip", settings_roundtrip},
         {"needs_code_stale", needs_code_stale}, {"needs_code_ready", needs_code_ready}, {"needs_code_nothing", needs_code_nothing},
+        {"needs_code_cheats", needs_code_cheats},
     };
     for (size_t i = 0; i < sizeof tests / sizeof *tests; i++) {
         fresh_tmp();  // (each test in its own folder: none sees another's files)

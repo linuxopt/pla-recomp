@@ -1,0 +1,13 @@
+Pokemon Legends: Arceus 1.1.1 cheats (AEE8F150DDA1B5A8.txt)
+
+From the GBAtemp "Pokemon Legends Arceus Cheat Database" thread, maintained by OblivionReign:
+  https://gbatemp.net/threads/pokemon-legends-arceus-cheat-database.606215/
+  (its Legends.zip attachment, the 1.1.1 file; downloaded 2026-11-11)
+
+Credited in the thread: SkyQueen, Stoned, 8BitWonder, WinBom, Eiffel2018, patjenova, abadidea, INSTRUMENTAL.
+
+The thread gives no license for the codes. They are shipped here as they were posted, with credit; ask the thread's
+maintainer before redistributing them widely. All are off until switched on in the launcher's Mods > Cheats tab.
+
+In PL:A Recomp: cheats that change values run live; cheats that change the game's code are compiled into the game
+code (patches/0010-code-cheats) and then switch on and off like the others. Back up your save before using cheats.

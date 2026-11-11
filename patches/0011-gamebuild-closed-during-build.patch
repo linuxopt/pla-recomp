@@ -1,0 +1,55 @@
+From 1108a2c19b53513ddf80b91970e604a46ea8339f Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 22:41:13 -0500
+Subject: [PATCH] gamebuild: say when the app was closed during the build
+
+Closing the launcher (or a quit signal) mid-build runs end_all at exit, which
+ends the generators and compilers; the build thread then found them gone and
+logged "generator failed" (waitpid: no child processes). It now says the app
+was closed - the next start builds the game code again.
+---
+ runtime/gamebuild.c | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/runtime/gamebuild.c b/runtime/gamebuild.c
+index aecf502..a07ca03 100644
+--- a/runtime/gamebuild.c
++++ b/runtime/gamebuild.c
+@@ -36,6 +36,14 @@ static pthread_mutex_t g_plock = PTHREAD_MUTEX_INITIALIZER;
+ static PlatProc g_procs[MAX_PROCS];
+ static int g_nprocs;
+ static bool g_quitting;
++// The app is closing (end_all: atexit - the window closed, or a quit signal): its helpers were just ended, so a
++// generator or compiler "failing" now is that, not a fault of the build (it starts again at the next start)
++static bool quitting(void) {
++    pthread_mutex_lock(&g_plock);
++    bool q = g_quitting;
++    pthread_mutex_unlock(&g_plock);
++    return q;
++}
+ 
+ static void end_all(void) {
+     pthread_mutex_lock(&g_plock);
+@@ -382,7 +390,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
+                     if (r != 0) {
+                         char last[300];
+                         log_tail(g->log, last, sizeof last);
+-                        LOG("[gamebuild] generator (%s) failed (exit %d): %s\n", g->name, r, last);
++                        if (quitting()) LOG("[gamebuild] stopped: " RT_APP_NAME " was closed during the build\n");
++                        else LOG("[gamebuild] generator (%s) failed (exit %d): %s\n", g->name, r, last);
+                         snprintf(why, why_size, "the game code couldn't be prepared");
+                         ok = false;
+                     }
+@@ -429,7 +438,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
+             if (r != 0) {
+                 char last[300];
+                 log_tail(u->log, last, sizeof last);
+-                LOG("[gamebuild] compiling %s failed: %s\n", u->src, last);
++                if (quitting()) LOG("[gamebuild] stopped: " RT_APP_NAME " was closed during the build\n");
++                else LOG("[gamebuild] compiling %s failed: %s\n", u->src, last);
+                 snprintf(why, why_size, "the game code didn't compile");
+                 ok = false;
+             }
+-- 
+2.56.0
+

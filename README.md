@@ -52,7 +52,7 @@ Added by this AppImage (launcher, Options and Mods pages):
 
 | | |
 |---|---|
-| **Cheats** (Mods > Cheats) | Atmosphère cheat files for 1.1.1 (`AEE8F150DDA1B5A8.txt`, or a cheat database's `.zip`): *Import cheats...*, then tick each one on or off (all off at first). The ones on run while you play, from the game's next start. Only cheats that change values work: the game's code is recompiled, so cheats that rewrite instructions are greyed out ("changes the game's code: can't work here"). Back up your save first. No cheat codes are shipped. |
+| **Cheats** (Mods > Cheats) | Ships with the GBAtemp cheat database's 1.1.1 file (41 cheats: infinite money, merits and health, max items, shiny Pokémon, always level 100, 100 % catch rate, infinite PP, six IVs 31, easy research tasks...), credited in `cheats/CREDITS.txt`; *Import cheats...* takes another `AEE8F150DDA1B5A8.txt` or a cheat database's `.zip`. Tick each one on or off (all off at first); they run from the game's next start. Cheats that change values run live. Cheats that change the game's code are compiled into the game code as switchable variants (once per cheat file, about as long as the first setup: the launcher does it by itself, or *Rebuild the game code with these cheats*), then toggle like the others; one whose new instructions can't be translated stays greyed out. Back up your save first. |
 | **Field of view** (Options > Graphics) | 40-100 degrees (the game: 50). The field camera widens; aiming and close-ups keep their zoom. Legends: Arceus 1.1.1 only. |
 | **Render scale / Upscaler** (Options > Graphics) | With Resolution on Automatic: render at 100 / 75 / 50 / 25 % of the window, or Dynamic (lowered to hold the frame rate); AMD FSR 1 or bilinear brings it up to the window. |
 
@@ -94,6 +94,7 @@ the build uses host networking.
 | `0007-launcher-upscaling-options` | Render scale and Upscaler on the Graphics tab (both already in the renderer and `larecomp.ini`) |
 | `0008-field-of-view` | the Field of view setting: a hook on the camera update (`f_700193b65c`) widens the frame's render camera (`[[x0+0x3d0]+0x78]+0x1ec`) in tangent space |
 | `0009-helper-exit-logging` | the log says how a helper process ended (exit code or signal); `LARECOMP_PROC_LOG=1` traces every helper started, waited for and ended |
+| `0010-code-cheats` | cheats that rewrite instructions: every fixed instruction write in the cheat file is compiled in next to the original (`gen.py --code-variants`, the randomizer's `RANDO_CODE` path; `rando_word` picks the word on), and the cheat VM's writes into main's code switch those variants; `lasgame.so.variants` says which list the game code has, and a different one rebuilds it |
 
 Moving to a newer upstream: change `PIN_UPSTREAM_COMMIT` in `pins.env` and rebuild. A patch that no longer applies
 stops the build with its name: refresh it in `work/src` (edit, `git commit`, `git format-patch -1`).
@@ -111,6 +112,9 @@ stops the build with its name: refresh it in `work/src` (edit, `git commit`, `gi
 | `tests/gui_minimize.sh` | the launcher survives being minimized (needs an X11 desktop and xdotool) |
 
 Never commit `cache/`, `work/` or `dist/` (gitignored): `work/` holds the recompiled game code of test runs.
+
+`cheats/` holds the bundled cheat file and its credits (`CREDITS.txt`: the GBAtemp thread and its contributors). The thread
+gives no license for the codes: ask its maintainer before distributing them widely.
 
 ## Credits and licenses
 

@@ -43,8 +43,10 @@ for t in cc gcc clang python python3 zig; do [ -e "$W/bin/$t" ] && die "$t on th
 run() {
     local root=$1 log=$2; shift 2
     mkdir -p "$root" && rm -f "$root/lasrecomp.log"
-    env -i HOME="$HOME" DISPLAY="${DISPLAY:-}" XAUTHORITY="${XAUTHORITY:-}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
-        XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" PATH="$W/bin" LARECOMP_DATA_ROOT="$root" "$@" \
+    # (SDL's offscreen video driver: no window on the desktop - nothing there can close the test by accident; a closed
+    # launcher ends its build, which made earlier runs look like build failures)
+    env -i HOME="$HOME" SDL_VIDEO_DRIVER=offscreen XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" PATH="$W/bin" \
+        LARECOMP_DATA_ROOT="$root" "$@" \
         "$IMG" > "$log.out" 2>&1 &
     APP=$!
     RUNLOG=$root/lasrecomp.log OUTLOG=$log
@@ -150,6 +152,21 @@ rebuild)  # (a data folder with game files but no game code: the self-rebuild al
     grep -E '\[gamebuild\]|\[proc\]|\[setup\]' "$log" | cut -c1-200
     assert_ready "$root" "$log"
     say "ok: the game code rebuilt by itself"
+    ;;
+quit)  # (the launcher closed mid-build - a quit signal, as a closed window: the build says so, and stops)
+    root="$W/data setup"; log=$W/quit.log
+    [ -s "$root/extracted/romfs.bin" ] || die "run the setup phase first"
+    rm -f "$root/extracted/lasgame.so" "$root/extracted/lasgame.so.id"
+    run "$root" "$log" LARECOMP_PROC_LOG=1
+    wait_for "$log" '\[proc\] spawn .*zig' 300 || { stop; die "the build didn't start"; }
+    sleep 5
+    lr=$(tree "$APP" | while read -r p; do [ "$(basename "$(readlink -f /proc/$p/exe 2>/dev/null)")" = lasrecomp ] && echo "$p"; done | head -1)
+    kill -TERM "$lr"
+    wait_for "$log" 'stopped: .* was closed during the build|\[gamebuild\] failed' 120 || true
+    stop
+    grep -q "stopped: .* was closed during the build" "$log" || die "no 'closed during the build': $(grep -E '\[gamebuild\]' "$log" | tail -3)"
+    grep -q "generator (.*) failed" "$log" && die "still reported as a generator failure"
+    say "ok: closing mid-build is reported as that"
     ;;
 *) die "unknown phase $phase" ;;
 esac

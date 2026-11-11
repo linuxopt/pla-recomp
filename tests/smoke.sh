@@ -70,12 +70,11 @@ wait_for() {
 # stop: only this run's processes - the AppImage's runtime, AppRun -> lasrecomp and its children (the generator, zig).
 # (Never by name: another copy of the game may be running on this PC.)
 tree() { local c; for c in $(pgrep -P "$1"); do tree "$c"; done; echo "$1"; }
-stop() {
+stop() {  # (the list is taken once: when the AppImage's runtime ends first, its game is no longer in its tree)
     local pids
     pids=$(tree "$APP" 2>/dev/null || true)
     [ -n "$pids" ] && kill $pids 2>/dev/null || true
     sleep 3
-    pids=$(tree "$APP" 2>/dev/null || true)
     [ -n "$pids" ] && kill -9 $pids 2>/dev/null || true
     wait "$APP" 2>/dev/null || true
     sync_log
@@ -200,6 +199,27 @@ play)  # (the setup phase's data folder: the game started straight from the laun
     grep -E 'FATAL|dlopen|built for another version|undefined symbol' "$log" && die "the game code didn't load"
     grep -E '\[cheats\]' "$log" | head -3
     say "ok: the game runs ($(grep -oE '\[vk\] t=[0-9.]+ frame [0-9]+ [0-9.]+ fps' "$log" | tail -1))"
+    ;;
+quitimage)  # (the launcher asked to quit while it writes the game data image: it ends, it doesn't hang)
+    root="$W/data quitimage"; log=$W/quitimage.log
+    rm -rf "$root"
+    run "$root" "$log" LARECOMP_SETUP_DIR="$(view)"
+    for i in $(seq 6000); do
+        img=$(ls -S "$root"/extracted/romfs.bin* 2>/dev/null | head -1 || true)
+        [ -n "$img" ] && [ "$(stat -c %s "$img" 2>/dev/null || echo 0)" -gt 20000000 ] && break
+        sleep 0.05
+    done
+    lr=$(tree "$APP" | while read -r p; do [ "$(basename "$(readlink -f /proc/$p/exe 2>/dev/null)")" = lasrecomp ] && echo "$p"; done | head -1)
+    [ -n "$lr" ] || { stop; die "no launcher process"; }
+    kill -TERM "$lr"
+    for i in $(seq 100); do kill -0 "$lr" 2>/dev/null || break; sleep 0.1; done
+    if kill -0 "$lr" 2>/dev/null; then
+        st=$(cat /proc/$lr/status | grep -E '^State' || true)
+        stop
+        die "the launcher didn't end within 10 s of being asked to quit mid-image ($st)"
+    fi
+    stop
+    say "ok: asked to quit mid-image, the launcher ended"
     ;;
 *) die "unknown phase $phase" ;;
 esac

@@ -88,14 +88,15 @@ or "Your keys can't open those game files" under prod.keys. Your earlier setup i
 
 | Where | Option | |
 |---|---|---|
-| Options > Display | Resolution, Fullscreen, SMAA, Frame rate | 30 or 60 fps; tick **Experimental settings** for 72 / 120 / 144 / Unlimited |
+| Options > Display | Resolution, Fullscreen, SMAA, Frame rate | 30, 60, 72, 120, 144 or Unlimited |
 | Options > Graphics | **Render scale** | with Resolution on Automatic: 100 / 75 / 50 / 25 % of the window, or Dynamic (lowered to keep the frame rate) |
 | Options > Graphics | **Upscaler** | AMD FSR 1 (sharp) or bilinear, when rendering below the window's size |
 | Options > Graphics | **Field of view** | 40–100° (the game: 50°); aiming and close-ups keep their zoom |
 | Options > Graphics | Sharpening, Shadows, Shadow color, Draw distance, Shader loading | |
 
-Frame rates above 60 are marked experimental by upstream; in testing on this build 144 fps played fine through story
-scenes, but if a scripted scene ever stalls, set 60 or 30 fps in the game's Settings and try the scene again.
+Upstream marked frame rates above 60 as experimental. This build offers them as ordinary choices: in testing, 144 fps
+played fine through story scenes. A cutscene crash at 144 fps (the game reading an object that was already gone) is
+fixed. If a scripted scene ever stalls, set 60 or 30 fps in the game's Settings and try the scene again.
 
 ## Cheats
 
@@ -207,6 +208,8 @@ Applied in order on top of upstream `LegendsA` at `bc830dd` (v1.2.0-rc1):
 | `0016-gen-variant-branch-targets` | a code variant's branch target becomes a function start (else the game code wouldn't load) |
 | `0017-setup-part-files` | the game data images are written as `.part` and renamed when complete: a setup cut short isn't taken as set up |
 | `0018-cheats-off-pairs` | a database's "off" cheats (`X (off)`, `(OFF) X`, `X Off`) are paired with their cheat by name, shown as not needed and left out (ticked with their partner, they undid it) |
+| `0019-high-frame-rates-not-experimental` | 72 / 120 / 144 / Unlimited fps are ordinary Frame rate choices: no Experimental settings box, kept as saved |
+| `0020-cutscene-expired-weak-reference` | a cutscene that reached an object already gone no longer crashes (signal 11 at 0x118, seen at 144 fps): the game's own "nothing here" result is given instead |
 
 Moving to a newer upstream: change `PIN_UPSTREAM_COMMIT` in `pins.env` and rebuild. A patch that no longer applies
 stops the build with its name: refresh it in `work/src` (edit, `git commit`, `git format-patch -1`).
@@ -215,7 +218,7 @@ stops the build with its name: refresh it in `work/src` (edit, `git commit`, `gi
 
 | | |
 |---|---|
-| `tests/run_unit.sh` | C unit tests of the patched reader, setup and settings, the cheats (parser, VM, import, on / off, code variants, caves) and the field of view (`./build.sh shell tests/run_unit.sh`) |
+| `tests/run_unit.sh` | C unit tests of the patched reader, setup and settings, the cheats (parser, VM, import, on / off, code variants, caves), the field of view, high frame rates kept and the cutscene reference check (`./build.sh shell tests/run_unit.sh`) |
 | `tests/apprun_test.sh` | AppRun in a fake AppDir: the data folder is pinned for the runtime, shipped files seeded, bundled cheats seeded once |
 | `tests/gen_variants_test.py` | the generator's code-cheat variants and caves with the real lifter (`work/AppDir/python/bin/python3 -I tests/gen_variants_test.py work/src/tools`) |
 | `tests/zig_shared.sh` | zig links a game-library-shaped `.so` against the runtime (`ZIG_DIR=` for the AppDir's trimmed zig) |

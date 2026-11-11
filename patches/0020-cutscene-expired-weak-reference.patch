@@ -1,0 +1,79 @@
+From b9130d134c29cec21c9b35e011c52c8b768d57b4 Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 00:06:03 -0500
+Subject: [PATCH] Arceus: a cutscene's expired weak reference no longer crashes
+ the game
+
+f_70016e33ec locks the weak reference at x0 + 0x88 and reads +0x118 of the
+result without checking; at 144 fps a cutscene reached it with the object
+already gone (signal 11 accessing 0x118). Its caller takes a null result as
+"nothing for this one", so the hook gives that for an empty or expired
+reference and lets the game's function run for a live one.
+LARECOMP_PLA_WEAKREF=0 turns it off.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/hle/fps60.c       |  4 ++++
+ runtime/hle/pla_weakref.c | 35 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 39 insertions(+)
+ create mode 100644 runtime/hle/pla_weakref.c
+
+diff --git a/runtime/hle/fps60.c b/runtime/hle/fps60.c
+index 824c69f..d7d57df 100644
+--- a/runtime/hle/fps60.c
++++ b/runtime/hle/fps60.c
+@@ -675,6 +675,10 @@ void pla60_configure(const char *exefs) {
+             g_pla_mouse_look = !getenv("LARECOMP_PLA_MOUSE_LOOK") || atoi(getenv("LARECOMP_PLA_MOUSE_LOOK")) != 0;
+             rt_register_fnhook_at(0x700193d16cull, pla_mouse_look_hook);
+             { extern int pla_fov_hook(Cpu *, uint64_t); rt_register_fnhook_at(0x700193b65cull, pla_fov_hook); }  // (hle/pla_fov.c)
++            if (!getenv("LARECOMP_PLA_WEAKREF") || atoi(getenv("LARECOMP_PLA_WEAKREF"))) {  // (hle/pla_weakref.c: a
++                extern int pla_weakref_hook(Cpu *, uint64_t);  // cutscene's expired reference; =0: off)
++                rt_register_fnhook_at(0x70016e33ecull, pla_weakref_hook);
++            }
+             rt_register_fnhook_at(PLA_SCRIPT_STEP, pla_script_step_hook);
+             if (!getenv("LARECOMP_PLA_WAIT_TICK") || atoi(getenv("LARECOMP_PLA_WAIT_TICK"))) rt_register_fnhook_at(PLA_SCRIPT_FRAMES, pla_script_frames_hook);
+             if (!getenv("LARECOMP_PLA_SEQ_TICK") || atoi(getenv("LARECOMP_PLA_SEQ_TICK"))) rt_register_fnhook_at(PLA_SEQ_STEP, pla_seq_step_hook);
+diff --git a/runtime/hle/pla_weakref.c b/runtime/hle/pla_weakref.c
+new file mode 100644
+index 0000000..a9dc340
+--- /dev/null
++++ b/runtime/hle/pla_weakref.c
+@@ -0,0 +1,35 @@
++// A cutscene crash at high frame rates in Legends: Arceus 1.1.1 (patches/0020; signal 11 accessing 0x118 in
++// f_70016e33ec, 144 fps). The function locks the weak reference at x0 + 0x88 (f_70016e9e98: a control block with the
++// strong count at +0xc and the object's +0x50 at +0x18 - null when the count is 0 or the object cleared) and then reads
++// +0x118 of what it got without checking: a reference whose object is already gone - the order the cutscene's objects
++// go away in differs with the frame rate - read address 0x118. Its caller (f_70019d2368, a walk over a list of
++// objects) takes a null result (*x8, a pointer) as "nothing for this one" and goes on to the next, so for an empty or
++// expired reference the hook gives that result; a live one runs the game's own function. Anything that doesn't look
++// like the game's objects is left to the game.
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++
++#include "../cpu.h"
++
++static bool guest_ptr(uint64_t p, uint64_t align) { return p >= 0x7000000000ull && p < 0x7FFFFFF000ull && !(p & (align - 1)); }
++
++int pla_weakref_hook(Cpu *c, uint64_t addr) {
++    uint64_t obj = c->x[0], out = c->x[8];
++    if (!guest_ptr(obj, 8) || !guest_ptr(out, 8)) return 0;
++    uint64_t cb = *(const volatile uint64_t *)(uintptr_t)(obj + 0x88);
++    if (cb) {
++        if (!guest_ptr(cb, 8)) return 0;
++        uint32_t strong = *(const volatile uint32_t *)(uintptr_t)(cb + 0xc);
++        uint64_t target = *(const volatile uint64_t *)(uintptr_t)(cb + 0x18);
++        if (strong && target) return 0;  // (live: the game's function locks and uses it)
++    }
++    static int logged;
++    if (logged < 4) {
++        logged++;
++        fprintf(stderr, "[pla] %llx: its object's reference is %s - nothing for this one (as its caller expects)\n",
++                (unsigned long long)addr, cb ? "expired" : "empty");
++    }
++    *(volatile uint64_t *)(uintptr_t)out = 0;
++    return 1;
++}
+-- 
+2.56.0
+

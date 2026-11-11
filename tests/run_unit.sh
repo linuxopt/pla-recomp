@@ -19,3 +19,11 @@ clang -std=gnu11 -O1 -g -Wall -Wno-unused-function -I"$S" -Iwork/src/third_party
 clang -std=gnu11 -O1 -g -Wall -Wno-unused-function -I"$S" -I"$S/nvn" -Iwork/src/third_party -I/usr/local/include \
     tests/fov_test.c "$S/hle/pla_fov.c" "$S/settings.c" tests/unit_stubs.c -o "$B/fov" $(pkg-config --libs sdl3) -lm
 "$B/fov"
+# frame rates above 60 kept as saved (patches/0019): its own program - settings are read once per process
+clang -std=gnu11 -O1 -g -Wall -Wno-unused-function -I"$S" -I"$S/nvn" -Iwork/src/third_party -I/usr/local/include \
+    tests/settings_test.c "$S/settings.c" tests/unit_stubs.c -o "$B/settings" $(pkg-config --libs sdl3) -lm
+"$B/settings"
+# a cutscene's expired weak reference (patches/0020): the hook against fake objects at guest addresses
+clang -std=gnu11 -O1 -g -Wall -Wno-unused-function -I"$S" -Iwork/src/third_party \
+    tests/weakref_test.c "$S/hle/pla_weakref.c" -o "$B/weakref"
+"$B/weakref"

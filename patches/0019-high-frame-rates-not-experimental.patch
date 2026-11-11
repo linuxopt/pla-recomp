@@ -1,0 +1,120 @@
+From d44553fd6d6d53ad53648de58038bd2c29179a96 Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 23:59:21 -0500
+Subject: [PATCH] Frame rates above 60 are ordinary choices (no Experimental
+ settings)
+
+72, 120, 144 fps and Unlimited were offered only with "Experimental settings"
+on, with a warning that scripted scenes could stall - written on 2026-10-25,
+before the fixes that followed (script waits, scripted moves and camera cuts,
+throws, falls, battle openings at 144 fps). Played through story scenes at 144
+fps without a stall, they are ordinary choices now in the launcher and the
+game's Settings; the warnings are gone. An older larecomp.ini's experimental
+switch is read and ignored, and a saved rate above 60 is kept.
+---
+ runtime/hle/pla_options.c |  7 +++----
+ runtime/settings.c        |  7 +++----
+ runtime/ui/launcher_lg.mm | 26 +++-----------------------
+ 3 files changed, 9 insertions(+), 31 deletions(-)
+
+diff --git a/runtime/hle/pla_options.c b/runtime/hle/pla_options.c
+index 4657be8..71252f1 100644
+--- a/runtime/hle/pla_options.c
++++ b/runtime/hle/pla_options.c
+@@ -74,7 +74,6 @@ static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v;
+ static int get_fps(void) { return find(k_fps, 6, g_settings.next_fps ? g_settings.next_fps : g_settings.fps); }
+ // (120 / 144: the game's own logic was made for 30 and some of it counts frames; the row's description says so while
+ // one of them is chosen - drawn again right after the change, settings_screen_buttons)
+-static const char *const k_fps_warning = "Experimental: scripted scenes can stall at this rate. If you get stuck, set 60 or 30 fps.";
+ static bool g_info_pending;
+ bool legends_set_fps(int fps);  // runtime/hle/fps60.c: at once
+ static void set_fps(int i) {
+@@ -179,8 +178,8 @@ static const Row k_rows[] = {
+      CHOICE, 2, {"Export", "Import"}, pkm_files_get, pkm_files_set, pkm_files_run},
+ };
+ #define NROWS (int)(sizeof k_rows / sizeof *k_rows)
+-// A row's choices as offered: the frame rate's above 60 only with the start screen's Experimental settings on
+-static int nchoice(const Row *w) { return w->get == get_fps && !g_settings.experimental ? 2 : w->n; }
++// A row's choices as offered (every frame rate: those above 60 are ordinary choices now, patches/0019)
++static int nchoice(const Row *w) { return w->n; }
+ static int g_first[NROWS];  // CHOICE rows of more than 3: the first of the three shown
+ 
+ static int row_of(uint32_t id) { return id >= FIRST_ID && id < FIRST_ID + (uint32_t)NROWS ? (int)(id - FIRST_ID) : -1; }
+@@ -397,7 +396,7 @@ static int description_hook(Cpu *c, uint64_t addr) {  // (view, id) -> [x8] stri
+     c->x[1] = 0;
+     rt_call_original(c, addr);
+     uint8_t *str = (uint8_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)out;
+-    if (str) put_text(str, k_rows[r].get == get_fps && get_fps() >= 2 ? k_fps_warning : k_rows[r].info, 48);
++    if (str) put_text(str, k_rows[r].info, 48);
+     return 1;
+ }
+ 
+diff --git a/runtime/settings.c b/runtime/settings.c
+index 0c1ffee..0643dd6 100644
+--- a/runtime/settings.c
++++ b/runtime/settings.c
+@@ -130,10 +130,9 @@ void settings_load(void) {
+         }
+     }
+     fclose(f);
+-    // Above 60 fps is experimental (the game's logic was made for 30; some of it counts frames): offered only with
+-    // "Experimental settings" on. An ini from before that switch with such a rate in it: the switch turned on for it.
+-    if (!g_experimental_seen && g_settings.fps > 60) g_settings.experimental = true;
+-    if (!g_settings.experimental && g_settings.fps > 60) g_settings.fps = 60;
++    // (Frame rates above 60 were "experimental" - offered only with that switch on - until they had played through the
++    // story scenes cleanly at 144 fps: ordinary choices now (patches/0019). An older ini's switch is read and ignored.)
++    (void)g_experimental_seen;
+     if (g_settings.volume < 0) g_settings.volume = 0;
+     if (g_settings.volume > 2) g_settings.volume = 2;
+     LOG("[settings] loaded %s\n", SETTINGS_FILE);
+diff --git a/runtime/ui/launcher_lg.mm b/runtime/ui/launcher_lg.mm
+index 7cb8e78..17082b6 100644
+--- a/runtime/ui/launcher_lg.mm
++++ b/runtime/ui/launcher_lg.mm
+@@ -1247,31 +1247,12 @@ extern "C" void launcher_lg_run(const char *root) {
+         ImGui::Combo(T("Resolution", "Resolução"), &res, g_pt ? res_pt : res_en, 6);
+         if (ImGui::Checkbox(T("Fullscreen", "Tela cheia"), &full) && classic) SDL_SetWindowFullscreen(win, full);  // (launcher: at Play)
+         ImGui::Checkbox(T("Anti-aliasing (SMAA)", "Suavizar serrilhado (SMAA)"), &smaa);
+-        static const char *const fps_names_en[] = {"30 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Unlimited"};  // (above 60: Experimental settings)
++        static const char *const fps_names_en[] = {"30 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Unlimited"};
+         static const char *const fps_names_pt[] = {"30 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Ilimitada"};
+-        if (!experimental && fps_i > 1) fps_i = 1;
+-        ImGui::Combo(T("Frame rate", "Taxa de quadros"), &fps_i, g_pt ? fps_names_pt : fps_names_en, experimental ? 6 : 2);
++        ImGui::Combo(T("Frame rate", "Taxa de quadros"), &fps_i, g_pt ? fps_names_pt : fps_names_en, 6);  // (all ordinary: 0019)
+         if (fps_i >= 1 && fps_i <= 4)  // (Unlimited: always real time, hle/fps60.c)
+             ImGui::Checkbox(T("Keep full speed when the frame rate dips", "Manter a velocidade total quando a taxa de quadros cai"), &realtime);
+-        if (fps_i >= 2)  // (72 / 120 / 144 / Unlimited: the game's own logic was made for 30; some of it counts frames)
+-            ImGui::TextColored(k_yellow, "%s",
+-                               T("Above 60 fps is experimental. Some scripted scenes can stall at these rates\n"
+-                                              "(a cutscene that walks you somewhere may never let go of you). If that happens,\n"
+-                                              "set 60 or 30 fps in the game's Settings and step into the scene again.",
+-                                              "Acima de 60 fps é experimental. Algumas cenas com script podem travar nessas taxas\n"
+-                                              "(uma cena que leva você a algum lugar pode nunca soltar o controle). Se acontecer,\n"
+-                                              "escolha 60 ou 30 fps nas configurações do jogo e entre na cena de novo."));
+         ImGui::Checkbox(T("Show FPS counter", "Mostrar contador de FPS"), &showfps);
+-        ImGui::Spacing();
+-        ImGui::Checkbox(T("Experimental settings", "Configurações experimentais"), &experimental);
+-        ImGui::Indent(ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x);
+-        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+-        ImGui::TextWrapped("%s", T("Settings that aren't finished yet: frame rates above 60 (72, 120, 144, Unlimited). Shown here and in "
+-                                   "the game's Settings only while this is on.",
+-                                   "Configurações ainda não terminadas: taxas de quadros acima de 60 (72, 120, 144, Ilimitada). Aparecem "
+-                                   "aqui e nas configurações do jogo só com isto ligado."));
+-        ImGui::PopStyleColor();
+-        ImGui::Unindent(ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x);
+     };
+     auto settings_graphics = [&]() {  // (the game's Settings rows of the same names: runtime/hle/pla_options.c)
+         const char *const scale_names[] = {"100%", "75%", "50%", "25%",
+@@ -1798,8 +1779,7 @@ extern "C" void launcher_lg_run(const char *root) {
+     g_settings.res_height = res_lines[res];
+     g_settings.fullscreen = full;
+     g_settings.antialias = smaa ? AA_SMAA : AA_OFF;
+-    if (!experimental && fps_i > 1) fps_i = 1;
+-    g_settings.experimental = experimental;
++    g_settings.experimental = experimental;  // (kept as it was: it gates nothing now)
+     g_settings.fps = fps_vals[fps_i >= 0 && fps_i < 6 ? fps_i : 0];
+     g_settings.wild_battle = wildb;
+     g_settings.show_fps = showfps;
+-- 
+2.56.0
+

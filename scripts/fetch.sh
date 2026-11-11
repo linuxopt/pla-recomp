@@ -41,4 +41,5 @@ for name in ZIG PYTHON WHEEL_LZ4 WHEEL_CAPSTONE WHEEL_UNICORN APPIMAGETOOL RUNTI
     rm -rf "cache/$lower" && mv "cache/dl.$lower" "cache/$lower"
     fetched=$((fetched + 1))
 done
+chmod 755 cache/appimagetool/*.AppImage  # (appimagetool runs from the cache)
 echo "fetch: all pins ok ($fetched downloaded)"

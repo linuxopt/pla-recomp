@@ -1,0 +1,31 @@
+#!/bin/sh
+# AppRun: PL:A Recomp from the AppImage. The runtime keeps everything it writes in its data folder (runtime/paths.c):
+# $LARECOMP_DATA_ROOT, else $XDG_DATA_HOME/plarecomp, else ~/.local/share/plarecomp. It reads plugins/ and mods/ only
+# from there, so the ones shipped here are copied in first - each switched off until turned on in the Mods page
+# (larecomp.ini is never touched here). The bundled libraries are found by RPATH, not LD_LIBRARY_PATH, so the
+# programs the runtime starts (the generator's Python, zig, a browser) see the system's libraries as usual.
+HERE=$(dirname "$(readlink -f "$0")")
+
+if [ -n "$LARECOMP_DATA_ROOT" ]; then D=$LARECOMP_DATA_ROOT
+else
+    case "$XDG_DATA_HOME" in /*) D=$XDG_DATA_HOME/plarecomp ;; *) D=${HOME:-/tmp}/.local/share/plarecomp ;; esac
+fi
+if mkdir -p "$D/plugins" "$D/mods" "$D/lua-examples" 2>/dev/null; then
+    # plugins: copied when missing or different (a newer AppImage brings newer plugins)
+    for f in "$HERE"/plugins/*; do
+        [ -f "$f" ] || continue
+        t=$D/plugins/$(basename "$f")
+        cmp -s "$f" "$t" 2>/dev/null || { cp -f "$f" "$t.new" && chmod 755 "$t.new" && mv -f "$t.new" "$t"; }
+    done
+    # mods: copied only when not there (a mod builds files into its own folder: Lush Foliage's trees)
+    for m in "$HERE"/mods/*/; do
+        [ -d "$m" ] || continue
+        n=$(basename "$m")
+        [ -e "$D/mods/$n" ] || cp -R "$m" "$D/mods/$n"
+    done
+    for f in "$HERE"/lua-examples/*; do
+        [ -f "$f" ] && [ ! -e "$D/lua-examples/$(basename "$f")" ] && cp "$f" "$D/lua-examples/"
+    done
+fi
+
+exec "$HERE/lasrecomp" "$@"

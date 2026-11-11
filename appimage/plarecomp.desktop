@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PL:A Recomp
+Comment=Pokémon Legends: Arceus, recompiled for PC from your own game files
+Exec=lasrecomp
+Icon=plarecomp
+Categories=Game;
+Terminal=false

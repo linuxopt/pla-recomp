@@ -3,10 +3,10 @@
 # runtime/gamebuild.c does on the player's PC - compiled with the game code's flags and the PGO profile, linked
 # -shared with the runtime's functions left for the executable (-rdynamic) to provide - and an -rdynamic host loads
 # it and calls through. Run in the build container: ./build.sh shell tests/zig_shared.sh
-# ZIG_LINK_EXTRA: extra link flags to try (the fallback, if plain -shared doesn't link).
+# ZIG_DIR: another zig folder (the AppDir's trimmed one). ZIG_LINK_EXTRA: extra link flags to try (the fallback, if plain -shared doesn't link).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-ZIG=$(ls -d cache/zig/zig-x86_64-linux-0.17.0 2>/dev/null || true)
+ZIG=${ZIG_DIR:-$(ls -d cache/zig/zig-x86_64-linux-0.17.0 2>/dev/null || true)}
 if [ ! -x "$ZIG/zig" ]; then
     mkdir -p work/zigtest-unpack && tar -xf cache/zig/zig-x86_64-linux-0.17.0.tar.xz -C work/zigtest-unpack
     ZIG=work/zigtest-unpack/zig-x86_64-linux-0.17.0

@@ -1,0 +1,68 @@
+From f4bfb1f618c3aa553e7290fc4c2a8c6760c5282a Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 21:34:19 -0500
+Subject: [PATCH] Launcher: Upscaler and Render scale options
+
+Graphics: Render scale (100 / 75 / 50 / 25 % of the window, or Dynamic) while
+Resolution is Automatic, and the Upscaler that brings a lower render up to the
+window (AMD FSR 1 or bilinear) - both already in the renderer and larecomp.ini
+(res_mode, upscaler), now on the launcher's Options page too.
+---
+ runtime/ui/launcher_lg.mm | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/runtime/ui/launcher_lg.mm b/runtime/ui/launcher_lg.mm
+index a66c50b..9c0e11d 100644
+--- a/runtime/ui/launcher_lg.mm
++++ b/runtime/ui/launcher_lg.mm
+@@ -1096,6 +1096,11 @@ extern "C" void launcher_lg_run(const char *root) {
+     int detail_i = g_settings.detail >= 0 && g_settings.detail <= 3 ? g_settings.detail : 0;
+     int shadows_i = g_settings.shadows >= 0 && g_settings.shadows <= 2 ? g_settings.shadows : 0;
+     int sharp_i = g_settings.sharpen >= 0 && g_settings.sharpen <= 3 ? g_settings.sharpen : 0;
++    // Upscaling (patches/0007): how a render resolution below the window's reaches it (runtime/nvn/output_scale.c,
++    // nvn/vulkan/exec.c), and the render scale while Resolution is Automatic (res_mode: a share of the window, or Dynamic)
++    static const int scale_modes[] = {RES_MATCH, RES_Q75, RES_Q50, RES_Q25, RES_DYNAMIC};
++    auto scale_index = [&](int mode) { for (int i = 0; i < 5; i++) if (scale_modes[i] == mode) return i; return 0; };
++    int ups_i = g_settings.upscaler == UPSCALE_BILINEAR, scale_i = scale_index(g_settings.res_mode);
+     auto apply_rec = [&]() { res = rec.res, fps_i = rec.fps, shl_i = rec.nowait; };
+     if (g_settings_fresh) apply_rec();
+     int bg_i = g_settings.background >= 0 && g_settings.background <= 2 ? g_settings.background : 0;
+@@ -1115,6 +1120,7 @@ extern "C" void launcher_lg_run(const char *root) {
+         fps_i = fps_index(d.fps);
+         wildb = d.wild_battle, prompts_i = d.button_prompts, smooth_sh = d.shadow_smooth, shcol_i = d.shadow_color, bg_i = d.background, pk_i = d.pkhex_link;
+         detail_i = d.detail, shadows_i = d.shadows, sharp_i = d.sharpen;
++        ups_i = d.upscaler == UPSCALE_BILINEAR, scale_i = scale_index(d.res_mode);
+         shl_i = d.shader_nowait;
+         gopt = k_gopt_default;
+     };
+@@ -1241,6 +1247,18 @@ extern "C" void launcher_lg_run(const char *root) {
+         ImGui::Unindent(ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x);
+     };
+     auto settings_graphics = [&]() {  // (the game's Settings rows of the same names: runtime/hle/pla_options.c)
++        const char *const scale_names[] = {"100%", "75%", "50%", "25%",
++                                           T("Dynamic (lowered to hold the frame rate)", "Dinâmica (reduzida para manter a taxa de quadros)")};
++        ImGui::BeginDisabled(res != 0);  // (a fixed Resolution is the render size itself)
++        ImGui::Combo(T("Render scale", "Escala de renderização"), &scale_i, scale_names, 5);
++        ImGui::EndDisabled();
++        if (res != 0 && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
++            ImGui::SetTooltip("%s", T("With Resolution on Automatic (window size): the game renders at this share of the window.",
++                                      "Com a Resolução em Automática (tamanho da janela): o jogo renderiza nesta parte da janela."));
++        const char *const ups_names[] = {T("AMD FSR 1 (sharp)", "AMD FSR 1 (nítido)"), T("Bilinear (soft)", "Bilinear (suave)")};
++        ImGui::Combo(T("Upscaler", "Upscaler"), &ups_i, ups_names, 2);
++        ImGui::SameLine();
++        ImGui::TextDisabled("%s", T("(when rendering below the window's size)", "(quando renderiza abaixo do tamanho da janela)"));
+         const char *const sharp_names[] = {T("Off", "Desligado"), T("Low", "Baixo"), T("Medium", "Médio"), T("High", "Alto")};
+         ImGui::Combo(T("Sharpening", "Nitidez"), &sharp_i, sharp_names, 4);
+         const char *const shadow_names[] = {"Switch (1024)", T("High (2048)", "Alta (2048)"), T("Ultra (4096)", "Ultra (4096)")};
+@@ -1762,6 +1780,8 @@ extern "C" void launcher_lg_run(const char *root) {
+     g_settings.detail = detail_i;
+     g_settings.shadows = shadows_i;
+     g_settings.sharpen = sharp_i;
++    g_settings.upscaler = ups_i ? UPSCALE_BILINEAR : UPSCALE_FSR1;
++    g_settings.res_mode = scale_modes[scale_i];
+     g_settings.background = bg_i;
+     g_settings.pkhex_link = pk_i;
+     g_settings.shader_nowait = shl_i;
+-- 
+2.56.0
+

@@ -17,6 +17,13 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq && apt-get install -y -qq --no-install-recommends $(echo $PKGS) >/dev/null
 cd /tmp && /app.AppImage --appimage-extract >/dev/null
 mkdir -p /root/.switch && echo 'header_key = 00000000000000000000000000000000000000000000000000000000000000ff' > /root/.switch/prod.keys
+# a stand-in game header (only main's NSO header with the 1.1.1 build id - no game data) and made-up cheats, so the
+# Cheats tab has something to list: one that changes a value, one that patches code (shown as unable to work here)
+mkdir -p /tmp/data/extracted/exefs /tmp/data/cheats
+printf 'NSO0' > /tmp/data/extracted/exefs/main; head -c 60 /dev/zero >> /tmp/data/extracted/exefs/main
+printf '\\x00\\x10\\x00\\x00' | dd of=/tmp/data/extracted/exefs/main bs=1 seek=24 conv=notrunc 2>/dev/null  # (text: offset 0, 0x1000 bytes)
+printf '\\xae\\xe8\\xf1\\x50\\xdd\\xa1\\xb5\\xa8' | dd of=/tmp/data/extracted/exefs/main bs=1 seek=64 conv=notrunc 2>/dev/null
+printf '[Test: a value]\\n04100000 00000100 00000063\\n[Test: patches code]\\n04000000 00000010 52800020\\n' > /tmp/data/cheats/AEE8F150DDA1B5A8.txt
 export LARECOMP_DATA_ROOT=/tmp/data VK_ICD_FILENAMES=\$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)
 Xvfb :9 -screen 0 1280x720x24 >/dev/null 2>&1 & sleep 2
 export DISPLAY=:9
@@ -28,8 +35,12 @@ shot() { import -window root /out/gui-\$1.png; }
 click() { xdotool mousemove --window \$W \$1 \$2; sleep 0.5; xdotool mousedown 1; sleep 0.2; xdotool mouseup 1; }  # (ImGui: the pointer there a frame before the press)
 shot home
 click 1049 334; sleep 3; shot files
-xdotool key --window \$W Escape; sleep 2
+click 1153 43; sleep 2
 click 1049 402; sleep 3; shot mods
+click 159 131; sleep 2; shot cheats
+click 1153 43; sleep 2
+click 1049 198; sleep 3; shot options
+click 193 131; sleep 2; shot graphics
 grep -E 'setup_|plugins_on|^mod ' /tmp/data/larecomp.ini > /out/gui-ini.txt || true
 echo gui_pages: done
 "

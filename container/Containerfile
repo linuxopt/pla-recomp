@@ -1,0 +1,24 @@
+# The build environment: Debian 13 (glibc 2.41), so the AppImage runs on Debian 13 / Ubuntu 25.04 / Fedora 42 / Arch
+# and newer. Upstream needs SDL 3.4 (SDL_LoadPNG), newer than Debian's, so SDL is built from its release tarball.
+FROM docker.io/library/debian:trixie
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential clang lld make pkg-config git curl ca-certificates xz-utils zstd file squashfs-tools \
+        patchelf python3 python3-venv cmake ninja-build desktop-file-utils \
+        libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libshaderc-dev libvulkan-dev \
+        libwayland-dev wayland-protocols libxkbcommon-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev \
+        libxi-dev libxss-dev libxfixes-dev libxtst-dev libpipewire-0.3-dev libpulse-dev libasound2-dev \
+        libdbus-1-dev libudev-dev libdecor-0-dev libegl-dev libgl-dev libdrm-dev libgbm-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG SDL_VERSION=3.4.20
+ARG SDL_SHA256=f3bb06f55bed9557227a700af2ea62e49497ebdf58037732a731a5fb3ef8581f
+RUN mkdir /tmp/sdl && cd /tmp/sdl \
+    && curl -fsSLo sdl.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VERSION}/SDL3-${SDL_VERSION}.tar.gz \
+    && echo "${SDL_SHA256}  sdl.tar.gz" | sha256sum -c - \
+    && tar xf sdl.tar.gz && cmake -S SDL3-${SDL_VERSION} -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
+    && cmake --build build && cmake --install build \
+    && install -Dm644 SDL3-${SDL_VERSION}/LICENSE.txt /usr/local/share/licenses/SDL3/LICENSE.txt \
+    && ldconfig && rm -rf /tmp/sdl

@@ -1,0 +1,159 @@
+From 060120825554db5109307c89c7a9e2fb9a568415 Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 20:07:43 -0500
+Subject: [PATCH] nxpkg: open the picked package files with the picked
+ prod.keys
+
+nxpkg_open_files reads exactly the listed .nsp / .xci with exactly the given keys
+file (+ title.keys beside it); nxpkg_keys_default says which keys file the usual
+search would pick. nxpkg_open shares the same start and finish.
+---
+ runtime/nxpkg.c | 80 ++++++++++++++++++++++++++++++++++++-------------
+ runtime/nxpkg.h |  7 +++++
+ 2 files changed, 67 insertions(+), 20 deletions(-)
+
+diff --git a/runtime/nxpkg.c b/runtime/nxpkg.c
+index 5d2c867..a24fbd9 100644
+--- a/runtime/nxpkg.c
++++ b/runtime/nxpkg.c
+@@ -286,6 +286,19 @@ static bool exists(const char *p) {
+     return stat(p, &st) == 0 && S_ISREG(st.st_mode);
+ }
+ 
++// One keys file: read and completed (keys_derive); true only if it has a usable header key.
++static bool keys_load(Keys *k, const char *p) {
++    if (!exists(p)) return false;
++    Keys t;
++    memset(&t, 0, sizeof t);
++    keys_file(&t, p);
++    keys_derive(&t);
++    if (!t.have_header) return false;
++    *k = t;
++    snprintf(k->path, sizeof k->path, "%s", p);
++    return true;
++}
++
+ // prod.keys: next to the packages, then the usual places (~/.switch, the emulators' key folders).
+ static bool keys_find(Keys *k, const char *folder) {
+     char dirs[24][1024];
+@@ -323,20 +336,18 @@ static bool keys_find(Keys *k, const char *folder) {
+         for (size_t j = 0; j < sizeof names / sizeof *names; j++) {
+             char p[1100];
+             snprintf(p, sizeof p, "%s/%s", dirs[i], names[j]);
+-            if (!exists(p)) continue;
+-            Keys t;
+-            memset(&t, 0, sizeof t);
+-            keys_file(&t, p);
+-            keys_derive(&t);
+-            if (!t.have_header) continue;
+-            *k = t;
+-            snprintf(k->path, sizeof k->path, "%s", p);
+-            return true;
++            if (keys_load(k, p)) return true;
+         }
+     }
+     return false;
+ }
+ 
++bool nxpkg_keys_default(char *out, size_t n) {
++    Keys k;
++    if (!keys_find(&k, ".")) return false;
++    return (size_t)snprintf(out, n, "%s", k.path) < n;
++}
++
+ // ------------------------------------------------------------------ packages
+ typedef struct { char path[1024]; FILE *f; } Pkg;
+ 
+@@ -904,23 +915,24 @@ static void read_versions(NxPkg *P) {
+     }
+ }
+ 
+-NxPkg *nxpkg_open(const char *path, const uint64_t *titles, int *err, char *why, size_t wn) {
++// The packages: from a folder (or one file) searched with the keys found near it, or from the listed files with
++// exactly the keys file given (the start screen's pickers). Then the same reading of what they hold (open_finish).
++static NxPkg *open_finish(NxPkg *P, const uint64_t *titles, int *err, char *why, size_t wn);
++
++static NxPkg *open_start(int *err, char *why, size_t wn) {
+     why[0] = 0;
+     NxPkg *P = calloc(1, sizeof *P);
++    if (!P) { *err = NXPKG_READ_ERROR, snprintf(why, wn, "out of memory"); return NULL; }
+     P->base = P->dlc = -1;
+     P->scratch = malloc(CHUNK + 32), P->buf = malloc(CHUNK + 32);
+-    char folder[1024];
+-    struct stat st;
+-    snprintf(folder, sizeof folder, "%s", path);
+-    if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+-        char *sl = strrchr(folder, '/');
+-        if (sl) *sl = 0; else snprintf(folder, sizeof folder, ".");
+-    }
+     if (!P->scratch || !P->buf) { *err = NXPKG_READ_ERROR, snprintf(why, wn, "out of memory"); nxpkg_close(P); return NULL; }
+-    if (!keys_find(&P->keys, folder)) {
++    return P;
++}
++
++static bool open_keys(NxPkg *P, bool found, int *err, char *why, size_t wn) {
++    if (!found) {
+         *err = NXPKG_NO_KEYS, snprintf(why, wn, "no prod.keys (with header_key) found");
+-        nxpkg_close(P);
+-        return NULL;
++        return false;
+     }
+     LOG("[nxpkg] keys: %s\n", P->keys.path);
+     char tk[1100];
+@@ -928,7 +940,35 @@ NxPkg *nxpkg_open(const char *path, const uint64_t *titles, int *err, char *why,
+     char *sl = strrchr(tk, '/');
+     snprintf(sl ? sl + 1 : tk, sizeof tk - (size_t)(sl ? sl + 1 - tk : 0), "title.keys");
+     title_keys_file(P, tk);
++    return true;
++}
++
++NxPkg *nxpkg_open(const char *path, const uint64_t *titles, int *err, char *why, size_t wn) {
++    NxPkg *P = open_start(err, why, wn);
++    if (!P) return NULL;
++    char folder[1024];
++    struct stat st;
++    snprintf(folder, sizeof folder, "%s", path);
++    if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
++        char *sl = strrchr(folder, '/');
++        if (sl) *sl = 0; else snprintf(folder, sizeof folder, ".");
++    }
++    if (!open_keys(P, keys_find(&P->keys, folder), err, why, wn)) { nxpkg_close(P); return NULL; }
+     scan(P, path, 0, false, NULL);
++    return open_finish(P, titles, err, why, wn);
++}
++
++NxPkg *nxpkg_open_files(const char *const *pkgs, int npkgs, const char *keys, const uint64_t *titles, int *err, char *why,
++                        size_t wn) {
++    NxPkg *P = open_start(err, why, wn);
++    if (!P) return NULL;
++    if (!open_keys(P, keys && keys_load(&P->keys, keys), err, why, wn)) { nxpkg_close(P); return NULL; }
++    for (int i = 0; i < npkgs; i++)
++        if (pkgs[i] && *pkgs[i]) add_package(P, pkgs[i]);
++    return open_finish(P, titles, err, why, wn);
++}
++
++static NxPkg *open_finish(NxPkg *P, const uint64_t *titles, int *err, char *why, size_t wn) {
+     read_versions(P);
+     for (int i = 0; i < P->nnca; i++)
+         if (P->ncas[i].type == 0 || P->ncas[i].type >= 4)
+diff --git a/runtime/nxpkg.h b/runtime/nxpkg.h
+index c534194..a168ef7 100644
+--- a/runtime/nxpkg.h
++++ b/runtime/nxpkg.h
+@@ -28,6 +28,13 @@ typedef struct NxPkg NxPkg;
+ // itself, ~/.switch, the emulators' key folders). titles: the wanted base program ids, best first, 0-terminated.
+ // NULL = failed: *err (NXPKG_*) and why (a short message for the log).
+ NxPkg *nxpkg_open(const char *path, const uint64_t *titles, int *err, char *why, size_t why_size);
++// The same from exactly these package files (the base game, its update...: any order) and exactly this keys file
++// (title.keys beside it is read too). No folder is searched. Same errors and result as nxpkg_open.
++NxPkg *nxpkg_open_files(const char *const *pkgs, int npkgs, const char *keys, const uint64_t *titles, int *err, char *why,
++                        size_t why_size);
++// The keys file nxpkg_open would use when no package folder has one (the data root, keys/, ~/.switch, the emulators'
++// key folders): its path in out. false = none found.
++bool nxpkg_keys_default(char *out, size_t n);
+ void nxpkg_close(NxPkg *p);
+ // True when `path` holds .nsp / .xci / .nsz / .xcz (a file, or a folder searched a few levels deep).
+ bool nxpkg_any(const char *path);
+-- 
+2.56.0
+

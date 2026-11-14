@@ -238,3 +238,5 @@ thread gives no license for the codes: ask its maintainer before distributing th
 [LZ&A Recomp](https://gitlab.com/mr.wifi1143/LZA-Recomp) by MrWifi, built on letsgo-recomp (raulzrrs) and LAS Recomp
 (Peiikai), MIT licensed. Cheats: the GBAtemp thread's maintainer OblivionReign and its contributors (see
 `cheats/CREDITS.txt`). Every bundled component's license is in the AppImage's `licenses/` folder.
+
+[![Listed on Decomp Buddy](https://decompbuddy.com/badge.svg)](https://decompbuddy.com/games/pok-mon-legends-arceus-pl-a-recomp-nintendo-switch)

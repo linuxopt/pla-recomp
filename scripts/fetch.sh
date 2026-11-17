@@ -21,7 +21,7 @@ git -C cache/upstream rev-parse --verify --quiet "$PIN_UPSTREAM_COMMIT^{commit}"
     die "upstream: commit $PIN_UPSTREAM_COMMIT not found"
 
 fetched=0
-for name in ZIG PYTHON WHEEL_LZ4 WHEEL_CAPSTONE WHEEL_UNICORN APPIMAGETOOL RUNTIME; do
+for name in ZIG PYTHON WHEEL_LZ4 WHEEL_CAPSTONE WHEEL_UNICORN APPIMAGETOOL RUNTIME FONT_JP FONT_JP_LICENSE; do
     url_var=PIN_${name}_URL sha_var=PIN_${name}_SHA256
     url=${!url_var} want=${!sha_var}
     lower=$(echo "$name" | tr 'A-Z' 'a-z')

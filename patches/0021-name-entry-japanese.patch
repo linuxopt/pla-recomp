@@ -1,0 +1,428 @@
+From 294181a2c627984a69c438f6cad82154251d9e90 Mon Sep 17 00:00:00 2001
+From: linuxopt <305337987+linuxopt@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:51:45 -0500
+Subject: [PATCH] Name entry: Japanese (and any language) typed, pasted or from
+ an input method
+
+The game's name entry took ASCII only with a controller, counted bytes (a
+Japanese character is 3: names were cut inside a character), had no
+Japanese glyphs and pasted only from ImGui's own clipboard.
+- characters counted, cut and deleted whole (runtime/utf8_text.c)
+- Noto Sans JP's kana and common kanji merged into the big font the first
+  time the name entry opens (the game's Japanese heading shows too)
+- Ctrl+V / Shift+Insert paste the system clipboard; an input method's
+  candidate window is placed at the field
+- the game's starting name kept in UTF-8, not '?'
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/hle/swkbd.c |  7 +---
+ runtime/ui/menu.mm  | 92 +++++++++++++++++++++++++++++++++++++++++----
+ runtime/ui/osk.h    |  2 +-
+ runtime/ui/osk.mm   | 22 ++++++-----
+ runtime/utf8_text.c | 89 +++++++++++++++++++++++++++++++++++++++++++
+ runtime/utf8_text.h | 23 ++++++++++++
+ 6 files changed, 212 insertions(+), 23 deletions(-)
+ create mode 100644 runtime/utf8_text.c
+ create mode 100644 runtime/utf8_text.h
+
+diff --git a/runtime/hle/swkbd.c b/runtime/hle/swkbd.c
+index 46c0a12..82a0218 100644
+--- a/runtime/hle/swkbd.c
++++ b/runtime/hle/swkbd.c
+@@ -40,11 +40,8 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
+     int max_len = (int)*(const int32_t *)(uintptr_t)(arg + 0x3ac);
+     uint32_t off = *(const uint32_t *)(uintptr_t)(arg + 0x3c0), n = *(const uint32_t *)(uintptr_t)(arg + 0x3c4);
+     uint64_t wb = LD64(arg + 0x4d0);
+-    char initial[96] = "";
+-    for (uint32_t i = 0; wb && i < n && i < sizeof initial - 1; i++) {
+-        uint16_t ch = *(const uint16_t *)(uintptr_t)(wb + off + 2 * i);
+-        initial[i] = ch < 0x80 ? (char)ch : '?';
+-    }
++    char initial[96] = "";  // (UTF-8: a Japanese name the game had is kept, not made '?')
++    if (wb && n) utf16_to_8((const uint16_t *)(uintptr_t)(wb + off), (int)(n < 32 ? n : 32), initial, sizeof initial);
+     char header[256], sub[512], guide[1024], text[96];
+     utf16_to_8((const uint16_t *)(uintptr_t)(arg + 0x24), 65, header, sizeof header);
+     utf16_to_8((const uint16_t *)(uintptr_t)(arg + 0xa6), 129, sub, sizeof sub);
+diff --git a/runtime/ui/menu.mm b/runtime/ui/menu.mm
+index 6ea0978..3a52bca 100644
+--- a/runtime/ui/menu.mm
++++ b/runtime/ui/menu.mm
+@@ -14,6 +14,7 @@
+ #include "imgui.h"
+ #include "imgui_impl_vulkan.h"
+ #include "osk.h"
++#include "../utf8_text.h"
+ extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.cpp
+ extern "C" double vk_gpu_ms(void);            // nvn/vulkan/exec.c: GPU time per frame (the FPS counter: if it is well below
+                                               // the frame time, the GPU isn't what limits the frame rate)
+@@ -131,10 +132,28 @@ static std::atomic<bool> g_last_pad{false};
+ static char g_kbd_text[96];
+ static int g_kbd_max = 8;
+ static char g_kbd_title[256];  // (the game's heading for it: swkbd.c)
++// The name field's place on the screen (output pixels), for the input method's candidate window (a Japanese IME's
++// kanji choices next to the field, not in a corner): set by the render thread, given to SDL on the event thread
++static std::atomic<int> g_ime_x{-1}, g_ime_y, g_ime_w, g_ime_h;
++// Text from the system clipboard (Ctrl+V / Shift+Insert while naming): ImGui's own clipboard is only its own
++static void push_text(const char *t);
+ static bool capturing() { return g_open.load() || g_kbd.load() == 1; }
+ // The game gets no input while this is true (runtime/hle/input.c): the question or the name entry is up.
+ extern "C" bool menu_input_captured(void) { return capturing(); }
+ 
++// Typed or pasted text into the queue in pieces that fit an event, each ending on a whole character
++static void push_text(const char *t) {
++    while (*t) {
++        QEvent q = {};
++        q.kind = QEvent::TEXT;
++        size_t n = utf8_fit(t, sizeof q.text - 1);
++        if (!n) n = 1;  // (a byte that isn't UTF-8: skipped by the field)
++        else memcpy(q.text, t, n);
++        push(q);
++        t += n;
++    }
++}
++
+ bool menu_handle_event(const SDL_Event *e) {
+     static bool back_down, start_down;
+     if (e->type == SDL_EVENT_KEY_DOWN) g_last_pad = false;
+@@ -144,6 +163,15 @@ bool menu_handle_event(const SDL_Event *e) {
+         if (e->key.scancode == SDL_SCANCODE_RETURN || e->key.scancode == SDL_SCANCODE_KP_ENTER) { g_kbd = 2; return true; }
+         if (e->key.scancode == SDL_SCANCODE_ESCAPE) { g_kbd = 3; return true; }
+     }
++    if (typing && e->type == SDL_EVENT_KEY_DOWN &&
++        ((e->key.scancode == SDL_SCANCODE_V && (e->key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI))) ||
++         (e->key.scancode == SDL_SCANCODE_INSERT && (e->key.mod & SDL_KMOD_SHIFT)))) {
++        if (char *t = SDL_GetClipboardText()) {  // (as typed text: the field, or the on-screen keyboard, takes it)
++            push_text(t);
++            SDL_free(t);
++        }
++        return true;
++    }
+     if (typing && e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && e->gbutton.button == SDL_GAMEPAD_BUTTON_START) {
+         g_kbd = 2;
+         return true;
+@@ -178,7 +206,7 @@ bool menu_handle_event(const SDL_Event *e) {
+     }
+     case SDL_EVENT_TEXT_INPUT:
+         if (!capturing()) return false;
+-        { QEvent q = {}; q.kind = QEvent::TEXT; strlcpy(q.text, e->text.text, sizeof q.text); push(q); }
++        push_text(e->text.text);  // (an input method commits a whole word at once: in pieces, never cut in a character)
+         return true;
+     case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: {
+         bool down = e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+@@ -244,6 +272,14 @@ void menu_apply_window_requests(void *win) {
+         else SDL_StopTextInput(w);
+         text_input = want_text;
+     }
++    static int ime_set[4] = {-2};
++    int ime[4] = {g_ime_x.load(), g_ime_y.load(), g_ime_w.load(), g_ime_h.load()};
++    if (want_text && ime[0] >= 0 && memcmp(ime, ime_set, sizeof ime)) {
++        memcpy(ime_set, ime, sizeof ime);
++        float d = g_pixel_density > 0 ? g_pixel_density : 1;
++        SDL_Rect r = {(int)(ime[0] / d), (int)(ime[1] / d), (int)(ime[2] / d), (int)(ime[3] / d)};
++        SDL_SetTextInputArea(w, &r, 0);
++    }
+     static bool first = true;
+     if (first || g_want_fullscreen_apply.exchange(false)) {
+         first = false;
+@@ -355,14 +391,21 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
+         if (appearing) ImGui::SetKeyboardFocusHere();
+         ImGui::SetNextItemWidth(-1);
+         ImGui::PushFont(g_font_big);
+-        ImGui::InputText("##name", g_kbd_text, (size_t)(g_kbd_max * 4 + 1 < (int)sizeof g_kbd_text ? g_kbd_max * 4 + 1 : sizeof g_kbd_text),
+-                         ImGuiInputTextFlags_CallbackCharFilter,
+-                         [](ImGuiInputTextCallbackData *d) -> int { return d->EventChar < 0x20 ? 1 : 0; });
++        // (the game's length is in characters: a Japanese one is 3 bytes here - cut whole characters past it)
++        ImGui::InputText("##name", g_kbd_text, sizeof g_kbd_text, ImGuiInputTextFlags_CallbackCharFilter | ImGuiInputTextFlags_CallbackEdit,
++                         [](ImGuiInputTextCallbackData *d) -> int {
++                             if (d->EventFlag == ImGuiInputTextFlags_CallbackCharFilter) return d->EventChar < 0x20 ? 1 : 0;
++                             int keep = (int)utf8_prefix(d->Buf, g_kbd_max);
++                             if (keep < d->BufTextLen) d->DeleteChars(keep, d->BufTextLen - keep);
++                             return 0;
++                         });
++        ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
++        g_ime_y = (int)b.y, g_ime_w = (int)(b.x - a.x), g_ime_h = (int)(b.y - a.y), g_ime_x = (int)a.x;
+         ImGui::PopFont();
+-        if ((int)strlen(g_kbd_text) > g_kbd_max) g_kbd_text[g_kbd_max] = 0;
++        utf8_cut(g_kbd_text, g_kbd_max);
+         ImGui::TextDisabled("%s      (%d / %d)", M("Enter  confirms      Esc  cancels", "Enter  confirma      Esc  cancela",
+                                                    "Enter  готово      Esc  отмена"),
+-                            (int)strlen(g_kbd_text), g_kbd_max);
++                            utf8_chars(g_kbd_text), g_kbd_max);
+     } else {  // controller: on-screen keyboard (osk.mm)
+         int r = osk_keys(g_kbd_text, sizeof g_kbd_text, g_kbd_max, appearing, scale, g_font_big);
+         if (r) g_kbd = r > 0 ? 2 : 3;  // (Start / + confirms in menu_handle_event too)
+@@ -371,6 +414,8 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
+     if (g_kbd.load() != 1) was_open = false;
+ }
+ 
++extern "C" volatile int g_screenshot_request;  // (runtime/hle/input.c: the next present is saved)
++
+ // Game thread (runtime/hle/swkbd.c): show the dialog, re-present the last frame until it's answered.
+ // Returns 1 confirmed (out = text, UTF-8), 0 cancelled.
+ extern "C" int menu_keyboard_run(const char *initial, int max_len, const char *title, char *out, int cap) {
+@@ -378,12 +423,23 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, const char *t
+     snprintf(g_kbd_text, sizeof g_kbd_text, "%s", initial ? initial : "");
+     snprintf(g_kbd_title, sizeof g_kbd_title, "%s", title ? title : "");
+     g_kbd_max = max_len > 0 && max_len < (int)sizeof g_kbd_text / 4 ? max_len : 8;
++    utf8_cut(g_kbd_text, g_kbd_max);
++    g_ime_x = -1;
+     input_reset();
+     g_kbd = 1;
+     // (test) LARECOMP_KBD_AUTO=<text>: answer at once
+     if (getenv("LARECOMP_KBD_AUTO")) { snprintf(g_kbd_text, sizeof g_kbd_text, "%s", getenv("LARECOMP_KBD_AUTO")); g_kbd = 2; }
+     else if (input_replay_text(g_kbd_text, (int)sizeof g_kbd_text)) g_kbd = 2;  // (LARECOMP_REPLAY: the recorded name)
+-    while (g_kbd.load() == 1 && !g_rt_unwind) {  // ~60 Hz (a reboot cancels)
++    // (test) LARECOMP_KBD_TYPE=<UTF-8 text>: once the entry is up, the text arrives as an input method's would (with
++    // LARECOMP_KBD_PAD=1 into the controller's on-screen keyboard), a screenshot of it, then Enter
++    const char *type_test = getenv("LARECOMP_KBD_TYPE");
++    if (type_test && getenv("LARECOMP_KBD_PAD")) g_last_pad = true;
++    for (int i = 0; g_kbd.load() == 1 && !g_rt_unwind; i++) {  // ~60 Hz (a reboot cancels)
++        if (type_test) {
++            if (i == 30) push_text(type_test);
++            if (i == 90) g_screenshot_request = 1;
++            if (i == 150) g_kbd = 2;
++        }
+         uint64_t t0 = SDL_GetTicks();
+         backend_represent();
+         uint64_t dt = SDL_GetTicks() - t0;
+@@ -435,6 +491,27 @@ extern "C" void menu_notice(const char *text) {
+     g_notice_until.store(SDL_GetTicks() + 2500);
+ }
+ 
++// Japanese for the name entry (and the game's Japanese heading for it): Noto Sans JP's kana and common kanji merged
++// into the big font the first time the name entry opens - not at start (a 16 MB texture most players never need)
++extern "C" void vk_imgui_fonts_changed(void);
++static void load_japanese_font(void) {
++    static bool tried;
++    if (tried) return;
++    tried = true;
++    char p[1100];
++    if (!rt_resource("NotoSansJP-Regular.otf", "third_party/fonts/NotoSansJP/NotoSansJP-Regular.otf", p, sizeof p)) {
++        LOG("[menu] no NotoSansJP-Regular.otf: names in Latin letters only\n");
++        return;
++    }
++    ImFontConfig cfg;
++    cfg.MergeMode = true, cfg.OversampleH = 1, cfg.PixelSnapH = true;
++    cfg.DstFont = g_font_big;
++    ImGuiIO &io = ImGui::GetIO();
++    if (!io.Fonts->AddFontFromFileTTF(p, 40, &cfg, io.Fonts->GetGlyphRangesJapanese())) return;
++    vk_imgui_fonts_changed();  // (made again by the next ImGui_ImplVulkan_NewFrame)
++    LOG("[menu] Japanese letters for the name entry (%s)\n", p);
++}
++
+ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
+     bool open = g_open.load(), kbd = g_kbd.load() == 1;
+     float fx, fy;
+@@ -466,6 +543,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
+         ImGui::GetStyle().ScaleAllSizes(scale);
+         style_scale = scale;
+     }
++    if (kbd) load_japanese_font();
+     ImGui_ImplVulkan_NewFrame();
+     ImGui::NewFrame();
+ 
+diff --git a/runtime/ui/osk.h b/runtime/ui/osk.h
+index 70f7277..9c0f73e 100644
+--- a/runtime/ui/osk.h
++++ b/runtime/ui/osk.h
+@@ -22,6 +22,6 @@ void osk_cancel(void);  // (menu closed / reboot: drop it, the field keeps its t
+ bool ui_text_busy(void);
+ 
+ // The typed text (big font) and the key grid, drawn into the current window: d-pad / stick move, A types, B deletes,
+-// Start / + OK; typed keys work too (Enter OK, Esc cancel). text: ASCII, at most max_chars. Returns 1 OK, -1 cancel,
++// Start / + OK; typed keys work too (Enter OK, Esc cancel). text: UTF-8, at most max_chars characters (and cap bytes). Returns 1 OK, -1 cancel,
+ // 0 still typing.
+ int osk_keys(char *text, size_t cap, int max_chars, bool appearing, float scale, ImFont *big, bool upper_first = true);
+diff --git a/runtime/ui/osk.mm b/runtime/ui/osk.mm
+index e0fe966..b313ec0 100644
+--- a/runtime/ui/osk.mm
++++ b/runtime/ui/osk.mm
+@@ -14,6 +14,7 @@
+ #include "imgui.h"
+ #include "imgui_internal.h"
+ #include "osk.h"
++#include "utf8_text.h"
+ 
+ static struct {
+     int open;                        // a field's keyboard is up
+@@ -95,12 +96,13 @@ int osk_keys(char *text, size_t cap, int max_chars, bool appearing, float scale,
+     ImGuiID own = ImGui::GetID("##oskkeys");
+     ImGui::SetKeyOwner(ImGuiKey_GamepadFaceRight, own);
+     if (max_chars <= 0 || max_chars > (int)cap - 1) max_chars = (int)cap - 1;
+-    int len = (int)strlen(text), r = 0;
+-    auto add = [&](char ch) { if (len < max_chars) text[len++] = ch, text[len] = 0; };
+-    auto del = [&]() { if (len > 0) text[--len] = 0; };
++    // (characters, not bytes: a Japanese name typed with a keyboard or Steam's keyboard, or pasted, is UTF-8)
++    int r = 0;
++    auto add = [&](uint32_t ch) { utf8_append_cp(text, cap, max_chars, ch); };
++    auto del = [&]() { utf8_pop(text); };
+ 
+-    // typed on a keyboard while it's up: straight into the text
+-    for (ImWchar c : io.InputQueueCharacters) if (c >= 0x20 && c < 0x7f) add((char)c);
++    // typed on a keyboard while it's up: straight into the text (any language: the font has Japanese too)
++    for (ImWchar c : io.InputQueueCharacters) add(c);
+     io.InputQueueCharacters.resize(0);
+     if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) del();
+     if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) r = 1;
+@@ -123,19 +125,19 @@ int osk_keys(char *text, size_t cap, int max_chars, bool appearing, float scale,
+                 ImGui::SetKeyboardFocusHere();
+                 ImGui::SetNavCursorVisible(true);
+             }
+-            if (ImGui::Button(lbl, ImVec2(k, k))) add(rows[row][i]);
++            if (ImGui::Button(lbl, ImVec2(k, k))) add((unsigned char)rows[row][i]);
+         }
+     }
+     if (ImGui::Button(upper ? "abc" : "ABC", ImVec2(k * 2, k))) upper = !upper;
+     ImGui::SameLine();
+-    if (ImGui::Button("Space", ImVec2(k * 3, k)) && len > 0) add(' ');
++    if (ImGui::Button("Space", ImVec2(k * 3, k)) && text[0]) add(' ');
+     ImGui::SameLine();
+     if (ImGui::Button("Delete", ImVec2(k * 2, k))) del();
+     ImGui::SameLine();
+     if (ImGui::Button("Cancel", ImVec2(k * 2, k))) r = -1;
+     ImGui::SameLine();
+     if (ImGui::Button("OK", ImVec2(k * 2, k))) r = 1;
+-    ImGui::TextDisabled("A  type      B  delete      Start / +  OK      (%d / %d)", len, max_chars);
++    ImGui::TextDisabled("A  type      B  delete      Start / +  OK      (%d / %d)", utf8_chars(text), max_chars);
+     return r;
+ }
+ 
+@@ -175,8 +177,8 @@ void osk_draw(ImFont *big, float scale) {
+     ImGui::PushFont(big);
+     ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", s.title);
+     ImGui::PopFont();
+-    int max = (int)(s.size < sizeof s.text ? s.size : sizeof s.text) - 1;
+-    int r = cancel ? -1 : osk_keys(s.text, sizeof s.text, max, s.appearing, scale, big);
++    size_t cap = s.size < sizeof s.text ? s.size : sizeof s.text;  // (the field's buffer: whole characters that fit)
++    int r = cancel ? -1 : osk_keys(s.text, cap, (int)cap - 1, s.appearing, scale, big);
+     s.appearing = false;
+     if (r) {
+         ImGui::CloseCurrentPopup();
+diff --git a/runtime/utf8_text.c b/runtime/utf8_text.c
+new file mode 100644
+index 0000000..3238f85
+--- /dev/null
++++ b/runtime/utf8_text.c
+@@ -0,0 +1,89 @@
++// UTF-8 text by characters (see utf8_text.h).
++#include "utf8_text.h"
++
++#include <string.h>
++
++// the length of the well-formed character at s (1-4), 0 if there's none (an end, a bad or cut-short sequence)
++static int char_len(const unsigned char *s, uint32_t *cp) {
++    unsigned c = s[0];
++    int n = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 0;
++    if (!c || !n) return 0;
++    uint32_t v = n == 1 ? c : c & (0x7F >> n);
++    for (int i = 1; i < n; i++) {
++        if ((s[i] & 0xC0) != 0x80) return 0;
++        v = (v << 6) | (s[i] & 0x3F);
++    }
++    static const uint32_t least[] = {0, 0, 0x80, 0x800, 0x10000};
++    if (v < least[n] || v > 0x10FFFF || (v >= 0xD800 && v < 0xE000)) return 0;
++    if (cp) *cp = v;
++    return n;
++}
++
++// the bytes of the character starting at s, skipping over a bad byte as one (for walking text as it is)
++static int step(const char *s) {
++    int n = char_len((const unsigned char *)s, NULL);
++    return n ? n : 1;
++}
++
++int utf8_chars(const char *s) {
++    int n = 0;
++    for (; *s; s += step(s)) n++;
++    return n;
++}
++
++size_t utf8_prefix(const char *s, int n) {
++    const char *p = s;
++    for (; *p && n > 0; n--) p += step(p);
++    return (size_t)(p - s);
++}
++
++void utf8_cut(char *s, int max_chars) { s[utf8_prefix(s, max_chars < 0 ? 0 : max_chars)] = 0; }
++
++void utf8_pop(char *s) {
++    size_t n = strlen(s);
++    if (!n) return;
++    size_t i = n - 1;
++    while (i > 0 && ((unsigned char)s[i] & 0xC0) == 0x80) i--;
++    s[i] = 0;
++}
++
++size_t utf8_fit(const char *s, size_t max_bytes) {
++    size_t k = 0;
++    while (s[k]) {
++        size_t n = (size_t)step(s + k);
++        if (k + n > max_bytes) break;
++        k += n;
++    }
++    return k;
++}
++
++int utf8_append_cp(char *dst, size_t cap, int max_chars, uint32_t cp) {
++    if (cp < 0x20 || cp == 0x7F || (cp >= 0x80 && cp < 0xA0) || cp > 0x10FFFF || (cp >= 0xD800 && cp < 0xE000)) return 0;
++    char b[4];
++    size_t n;
++    if (cp < 0x80) b[0] = (char)cp, n = 1;
++    else if (cp < 0x800) b[0] = (char)(0xC0 | cp >> 6), b[1] = (char)(0x80 | (cp & 0x3F)), n = 2;
++    else if (cp < 0x10000) b[0] = (char)(0xE0 | cp >> 12), b[1] = (char)(0x80 | ((cp >> 6) & 0x3F)), b[2] = (char)(0x80 | (cp & 0x3F)), n = 3;
++    else b[0] = (char)(0xF0 | cp >> 18), b[1] = (char)(0x80 | ((cp >> 12) & 0x3F)), b[2] = (char)(0x80 | ((cp >> 6) & 0x3F)),
++         b[3] = (char)(0x80 | (cp & 0x3F)), n = 4;
++    size_t len = strlen(dst);
++    if (utf8_chars(dst) >= max_chars || len + n + 1 > cap) return 0;
++    memcpy(dst + len, b, n);
++    dst[len + n] = 0;
++    return 1;
++}
++
++int utf8_append(char *dst, size_t cap, int max_chars, const char *src) {
++    int added = 0;
++    const unsigned char *s = (const unsigned char *)src;
++    while (*s) {
++        uint32_t cp;
++        int n = char_len(s, &cp);
++        if (!n) { s++; continue; }  // (not UTF-8: left out)
++        s += n;
++        if (cp < 0x20 || cp == 0x7F || (cp >= 0x80 && cp < 0xA0)) continue;  // (control characters)
++        if (!utf8_append_cp(dst, cap, max_chars, cp)) break;  // (full)
++        added++;
++    }
++    return added;
++}
+diff --git a/runtime/utf8_text.h b/runtime/utf8_text.h
+new file mode 100644
+index 0000000..ad389b9
+--- /dev/null
++++ b/runtime/utf8_text.h
+@@ -0,0 +1,23 @@
++// UTF-8 text by characters (code points), not bytes: the game's name entry (runtime/ui/menu.mm, runtime/ui/osk.mm)
++// takes Japanese - 3 bytes a character - and must count, cut and delete whole characters.
++#pragma once
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++int utf8_chars(const char *s);                    // characters in s
++size_t utf8_prefix(const char *s, int n);         // bytes of its first n characters (all of it if fewer)
++void utf8_cut(char *s, int max_chars);            // keep at most max_chars characters
++void utf8_pop(char *s);                           // drop the last character
++size_t utf8_fit(const char *s, size_t max_bytes); // bytes of the longest start of s within max_bytes, whole characters
++// Append src's characters to dst (a buffer of cap bytes, NUL-terminated) while dst has fewer than max_chars and they
++// fit; control characters and anything that isn't UTF-8 are left out. Returns the characters appended.
++int utf8_append(char *dst, size_t cap, int max_chars, const char *src);
++int utf8_append_cp(char *dst, size_t cap, int max_chars, uint32_t cp);  // (one code point)
++
++#ifdef __cplusplus
++}
++#endif
+-- 
+2.56.1
+

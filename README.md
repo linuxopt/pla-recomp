@@ -79,6 +79,9 @@ or "Your keys can't open those game files" under prod.keys. Your earlier setup i
 - **Controllers**: Xbox, PlayStation, Switch Pro and others, with button prompts to match (Options > Game).
 - **Keyboard and mouse**: WASD, mouse camera (click to take the mouse, Esc to let it go), mouse in the menus.
   Remap everything in **Controls**.
+- **Names in any language**: when the game asks for a name, type it with your keyboard's input method (Japanese
+  IME, Steam's on-screen keyboard), or paste it with Ctrl+V. Japanese kana and common kanji show in the box; the
+  game's limit counts characters. Its own font may not show every kanji the box accepts.
 - **Settings** are in the launcher (**Options**) and in the game (Menu > Help > Settings).
 - **Saves** are ordinary Switch save files, so PKHeX opens them; **PKHeX Link** (Settings) lets PKHeX's LiveHeX
   connect to the running game.
@@ -210,6 +213,7 @@ Applied in order on top of upstream `LegendsA` at `bc830dd` (v1.2.0-rc1):
 | `0018-cheats-off-pairs` | a database's "off" cheats (`X (off)`, `(OFF) X`, `X Off`) are paired with their cheat by name, shown as not needed and left out (ticked with their partner, they undid it) |
 | `0019-high-frame-rates-not-experimental` | 72 / 120 / 144 / Unlimited fps are ordinary Frame rate choices: no Experimental settings box, kept as saved |
 | `0020-cutscene-expired-weak-reference` | a cutscene that reached an object already gone no longer crashes (signal 11 at 0x118, seen at 144 fps): the game's own "nothing here" result is given instead |
+| `0021-name-entry-japanese` | the game's name entry takes Japanese (any language): characters counted and cut whole, not bytes; Noto Sans JP loaded when it first opens; Ctrl+V pastes the system clipboard; the input method's window sits at the field |
 
 Moving to a newer upstream: change `PIN_UPSTREAM_COMMIT` in `pins.env` and rebuild. A patch that no longer applies
 stops the build with its name: refresh it in `work/src` (edit, `git commit`, `git format-patch -1`).
@@ -218,7 +222,7 @@ stops the build with its name: refresh it in `work/src` (edit, `git commit`, `gi
 
 | | |
 |---|---|
-| `tests/run_unit.sh` | C unit tests of the patched reader, setup and settings, the cheats (parser, VM, import, on / off, code variants, caves), the field of view, high frame rates kept and the cutscene reference check (`./build.sh shell tests/run_unit.sh`) |
+| `tests/run_unit.sh` | C unit tests of the patched reader, setup and settings, the cheats (parser, VM, import, on / off, code variants, caves), the field of view, high frame rates kept, the cutscene reference check and the name entry's character counting (`./build.sh shell tests/run_unit.sh`) |
 | `tests/apprun_test.sh` | AppRun in a fake AppDir: the data folder is pinned for the runtime, shipped files seeded, bundled cheats seeded once |
 | `tests/gen_variants_test.py` | the generator's code-cheat variants and caves with the real lifter (`work/AppDir/python/bin/python3 -I tests/gen_variants_test.py work/src/tools`) |
 | `tests/zig_shared.sh` | zig links a game-library-shaped `.so` against the runtime (`ZIG_DIR=` for the AppDir's trimmed zig) |
@@ -237,6 +241,6 @@ thread gives no license for the codes: ask its maintainer before distributing th
 
 [LZ&A Recomp](https://gitlab.com/mr.wifi1143/LZA-Recomp) by MrWifi, built on letsgo-recomp (raulzrrs) and LAS Recomp
 (Peiikai), MIT licensed. Cheats: the GBAtemp thread's maintainer OblivionReign and its contributors (see
-`cheats/CREDITS.txt`). Every bundled component's license is in the AppImage's `licenses/` folder.
+`cheats/CREDITS.txt`). Japanese letters: Noto Sans JP (Google / Adobe, SIL Open Font License 1.1). Every bundled component's license is in the AppImage's `licenses/` folder.
 
 [![Listed on Decomp Buddy](https://decompbuddy.com/badge.svg)](https://decompbuddy.com/games/pok-mon-legends-arceus-pl-a-recomp-nintendo-switch)

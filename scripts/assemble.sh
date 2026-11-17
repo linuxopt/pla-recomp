@@ -79,6 +79,7 @@ cp "$S/docs/icon/icon_1024.png" "$A/icon.png"
 cp "$S/docs/icon/icon_1024.png" "$A/plarecomp.png"
 ln -s plarecomp.png "$A/.DirIcon"
 cp "$S/third_party/fonts/Baloo2/Baloo2-SemiBold.ttf" "$A/"
+cp cache/font_jp/NotoSansJP-Regular.otf "$A/"  # (Japanese in the game's name entry: patches/0021)
 
 # ---- licenses: this project's, upstream's notices, every bundled component's
 L=$A/licenses
@@ -90,6 +91,7 @@ cp "$S/third_party/imgui/LICENSE.txt" "$L/imgui-LICENSE.txt"
 cp "$S/third_party/vma/LICENSE.txt" "$L/VulkanMemoryAllocator-LICENSE.txt"
 cp "$S/third_party/smaa/LICENSE.txt" "$L/SMAA-LICENSE.txt"
 cp "$S/third_party/fonts/Baloo2/OFL.txt" "$L/Baloo2-OFL.txt"
+cp cache/font_jp_license/LICENSE "$L/NotoSansJP-OFL.txt"
 cp "$A/zig/LICENSE" "$L/zig-LICENSE.txt"
 cp "$(ls "$A"/python/lib/python"$PYV"/LICENSE.txt 2>/dev/null || ls "$A"/python/LICENSE* | head -1)" "$L/Python-LICENSE.txt"
 for w in lz4 capstone unicorn; do

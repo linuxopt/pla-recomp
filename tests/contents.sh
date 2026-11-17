@@ -9,7 +9,7 @@ trap 'rm -rf "$T"' EXIT
 (cd "$T" && "$IMG" --appimage-extract >/dev/null)
 R=$T/squashfs-root
 fail=0
-for f in AppRun lasrecomp plarecomp.desktop plarecomp.png .DirIcon icon.png Baloo2-SemiBold.ttf README.txt \
+for f in AppRun lasrecomp plarecomp.desktop plarecomp.png .DirIcon icon.png Baloo2-SemiBold.ttf NotoSansJP-Regular.otf licenses/NotoSansJP-OFL.txt README.txt \
          zig/zig python/python gen/gen.py gen/lifter.py gen/patches.py \
          gamelib-src/cpu.h gamelib-src/simd.h gamelib-src/simd_fp.h gamelib-src/gamelib.h gamelib-src/gamelib_entry.c \
          gamelib-src/hle_symbols.txt gamelib-src/pgo.profdata \

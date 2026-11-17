@@ -27,3 +27,6 @@ clang -std=gnu11 -O1 -g -Wall -Wno-unused-function -I"$S" -I"$S/nvn" -Iwork/src/
 clang -std=gnu11 -O1 -g -Wall -Wno-unused-function -I"$S" -Iwork/src/third_party \
     tests/weakref_test.c "$S/hle/pla_weakref.c" -o "$B/weakref"
 "$B/weakref"
+# Japanese in the game's name entry (patches/0021): characters counted and edited, not bytes
+clang -std=gnu11 -O1 -g -Wall -I"$S" tests/utf8_test.c "$S/utf8_text.c" -o "$B/utf8"
+"$B/utf8"
